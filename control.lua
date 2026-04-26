@@ -2428,6 +2428,8 @@ function index_station_record(rec)
   end
 end
 
+local refresh_station_power_record
+
 function apply_station_settings_tags(rec, tags)
   local settings = tags and tags.ff_station_settings
   if not rec or type(settings) ~= "table" then
@@ -3112,7 +3114,7 @@ local function station_available_energy(rec)
   return math.max(0, math.min(required_energy_j, available_energy + math.max(0, power_entity.energy or 0)))
 end
 
-local function refresh_station_power_record(rec)
+refresh_station_power_record = function(rec)
   if not rec then
     return
   end
