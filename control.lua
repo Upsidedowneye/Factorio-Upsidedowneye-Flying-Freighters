@@ -46,6 +46,8 @@ for key, value in pairs({
   GUI_MAP_ROUTE_FROM = "ff_map_route_from",
   GUI_MAP_ROUTE_TO = "ff_map_route_to",
   GUI_MAP_ROUTE_SAVE = "ff_map_route_save",
+  GUI_HOTKEY_SUMMARY = "ff_gui_hotkey_summary",
+  GUI_HOTKEY_ONLY_HINT = "ff_gui_hotkey_only_hint",
   GUI_CLOSE = "ff_gui_close",
   GUI_SCHEDULE_LIST = "ff_gui_schedule_list",
   GUI_SCHEDULE_ROWS_PANE = "ff_gui_schedule_rows_pane",
@@ -166,15 +168,26 @@ function find_child_recursive(element, child_name)
   if not element or not element.valid then
     return nil
   end
-  if element.name == child_name then
-    return element
-  end
-  for _, child in pairs(element.children) do
-    local found = find_child_recursive(child, child_name)
-    if found then
-      return found
+
+  local stack = {element}
+  while #stack > 0 do
+    local current = stack[#stack]
+    stack[#stack] = nil
+
+    if current and current.valid then
+      if current.name == child_name then
+        return current
+      end
+
+      local children = current.children
+      if children then
+        for idx = #children, 1, -1 do
+          stack[#stack + 1] = children[idx]
+        end
+      end
     end
   end
+
   return nil
 end
 
@@ -915,10 +928,24 @@ local function entity_marked_for_deconstruction(entity)
     return marked and true or false
   end
 
+  local first_error = marked
   ok, marked = pcall(to_be_deconstructed, entity)
   if ok then
     return marked and true or false
   end
+
+  throttled_diagnostic_log(
+    "entity_marked_for_deconstruction_warning_tick",
+    tostring(entity.unit_number or entity.name or "nil"),
+    {
+      tag = "ff-entity-marked-for-deconstruction-warning",
+      tick = game and game.tick or nil,
+      entity_name = entity.name,
+      entity_unit_number = entity.unit_number,
+      first_error_message = first_error,
+      second_error_message = marked,
+    }
+  )
 
   return false
 end
@@ -1157,8 +1184,80 @@ local function is_freighter_ghost_target(entity)
   return target ~= nil and target.name == "entity-ghost" and target.ghost_name == FREIGHTER_NAME
 end
 
+function throttled_diagnostic_log(bucket_name, warning_key, payload, interval_ticks)
+  if not game then
+    return
+  end
+
+  global.ff[bucket_name] = global.ff[bucket_name] or {}
+  local interval = tonumber(interval_ticks) or (60 * 10)
+  local last_warning_tick = global.ff[bucket_name][warning_key] or -interval
+  if game.tick - last_warning_tick < interval then
+    return
+  end
+
+  global.ff[bucket_name][warning_key] = game.tick
+  log(serpent.line(payload))
+end
+
+function safe_entity_backer_name(entity, context_key)
+  if not is_valid(entity) then
+    return nil
+  end
+
+  local ok, value = pcall(function() return entity.backer_name end)
+  if ok then
+    return (type(value) == "string" and value ~= "") and value or nil
+  end
+
+  throttled_diagnostic_log(
+    "entity_backer_name_read_warning_tick",
+    tostring(context_key or "read") .. ":" .. tostring(entity.unit_number or entity.name or "nil"),
+    {
+      tag = "ff-entity-backer-name-read-warning",
+      tick = game.tick,
+      context = context_key,
+      entity_name = entity.name,
+      entity_unit_number = entity.unit_number,
+      error_message = value,
+    }
+  )
+  return nil
+end
+
+function try_set_entity_backer_name(entity, value, context_key)
+  if not is_valid(entity) or type(value) ~= "string" then
+    return false
+  end
+
+  local ok, err = pcall(function()
+    entity.backer_name = value
+  end)
+  if ok then
+    return true
+  end
+
+  throttled_diagnostic_log(
+    "entity_backer_name_write_warning_tick",
+    tostring(context_key or "write") .. ":" .. tostring(entity.unit_number or entity.name or "nil"),
+    {
+      tag = "ff-entity-backer-name-write-warning",
+      tick = game.tick,
+      context = context_key,
+      entity_name = entity.name,
+      entity_unit_number = entity.unit_number,
+      error_message = err,
+    }
+  )
+  return false
+end
+
 local function station_edit_settings_from_tags(tags)
-  local settings = tags and tags.ff_station_settings or nil
+  local settings = type(tags) == "table" and type(tags.ff_station_settings) == "table" and tags.ff_station_settings or nil
+  local tagged_demand_requests = nil
+  if settings and type(settings.demand_requests) == "table" then
+    tagged_demand_requests = settings.demand_requests
+  end
   local rec = {
     route_signal = copy_signal_id(route_signal_from_value_or_nil(settings and settings.route_signal or nil)),
     route_signal_key = nil,
@@ -1168,7 +1267,7 @@ local function station_edit_settings_from_tags(tags)
     -- state for public builds, so migrated ghost/station settings always reopen
     -- in the simple drop-off mode until the feature is finished in a later update.
     use_complex_demands = STATION_COMPLEX_DEMANDS_FEATURE_ENABLED and settings and settings.use_complex_demands == true or false,
-    demand_requests = normalize_station_request_manifest(settings and settings.demand_requests or nil),
+    demand_requests = normalize_station_request_manifest(tagged_demand_requests),
     demand_request_group = normalize_station_request_group_name(settings and settings.demand_request_group or nil),
     is_fuel_stop = settings and settings.is_fuel_stop and true or false,
     is_ammo_stop = settings and settings.is_ammo_stop and true or false,
@@ -1193,9 +1292,13 @@ local function station_edit_settings_from_tags(tags)
 end
 
 local function freighter_edit_settings_from_tags(tags)
-  local settings = tags and tags.ff_freighter_settings or nil
+  local settings = type(tags) == "table" and type(tags.ff_freighter_settings) == "table" and tags.ff_freighter_settings or nil
+  local tagged_schedule = nil
+  if settings and type(settings.schedule) == "table" then
+    tagged_schedule = settings.schedule
+  end
   local rec = {
-    schedule = copy_freighter_schedule_entries(settings and settings.schedule or {
+    schedule = copy_freighter_schedule_entries(tagged_schedule or {
       {
         operation = settings and settings.operation or nil,
         from_signal = settings and settings.from_signal or nil,
@@ -1284,8 +1387,8 @@ end
 
 function freighter_runtime_name(entity, unit_number)
   if is_valid(entity) then
-    local ok, name = pcall(function() return entity.backer_name end)
-    if ok and name and name ~= "" then
+    local name = safe_entity_backer_name(entity, "freighter-runtime-name")
+    if name then
       return name
     end
   end
@@ -1651,6 +1754,111 @@ function is_gui_confirm_hotkey_suppressed_this_tick(player_index)
   return ticks and ticks[player_index] == game.tick or false
 end
 
+function player_forces_gui_hotkey_usage(player_index)
+  if not (settings and settings.get_player_settings and game and player_index) then
+    return false
+  end
+
+  local player = game.get_player(player_index)
+  if not player then
+    return false
+  end
+
+  local player_settings = settings.get_player_settings(player)
+  local setting = player_settings and player_settings["ff-force-gui-hotkey-usage"] or nil
+  return setting ~= nil and setting.value == true or false
+end
+
+function restore_station_hotkey_only_controls_from_record(player_index, root)
+  local edit = global.ff.player_edit[player_index]
+  if not edit or edit.kind ~= "station" then
+    return
+  end
+
+  local rec = edit.unit_number and global.ff.stations[edit.unit_number] or nil
+  if not rec then
+    return
+  end
+
+  local station_type_dropdown = find_child_recursive(root, GUI_STATION_TYPE)
+  local fuel_toggle = find_child_recursive(root, GUI_FUEL_STOP)
+  local ammo_toggle = find_child_recursive(root, GUI_AMMO_STOP)
+  local trash_toggle = find_child_recursive(root, GUI_TRASH_STOP)
+
+  if station_type_dropdown and station_type_dropdown.valid then
+    station_type_dropdown.selected_index = normalize_station_type(rec) == "demand" and 2 or 1
+  end
+  if fuel_toggle and fuel_toggle.valid then
+    fuel_toggle.state = rec.is_fuel_stop == true
+  end
+  if ammo_toggle and ammo_toggle.valid then
+    ammo_toggle.state = rec.is_ammo_stop == true
+  end
+  if trash_toggle and trash_toggle.valid then
+    trash_toggle.state = rec.is_trash_stop == true
+  end
+end
+
+function apply_hotkey_only_mode_to_open_gui(player_index)
+  local player = game and game.get_player(player_index) or nil
+  if not player then
+    return
+  end
+
+  local root = player.gui.screen[GUI_ROOT]
+  local edit = root and global.ff.player_edit[player_index] or nil
+  if not root or not edit then
+    return
+  end
+
+  local hotkey_only = player_forces_gui_hotkey_usage(player_index)
+  local hotkey_summary = find_child_recursive(root, GUI_HOTKEY_SUMMARY)
+  local hotkey_hint = find_child_recursive(root, GUI_HOTKEY_ONLY_HINT)
+  local save_button = find_child_recursive(root, GUI_SAVE)
+  local map_save_button = find_child_recursive(root, GUI_MAP_ROUTE_SAVE)
+
+  if save_button and save_button.valid then
+    save_button.enabled = not hotkey_only
+  end
+  if map_save_button and map_save_button.valid then
+    map_save_button.enabled = not hotkey_only
+  end
+
+  if edit.kind == "station" then
+    restore_station_hotkey_only_controls_from_record(player_index, root)
+    local station_type_dropdown = find_child_recursive(root, GUI_STATION_TYPE)
+    local fuel_toggle = find_child_recursive(root, GUI_FUEL_STOP)
+    local ammo_toggle = find_child_recursive(root, GUI_AMMO_STOP)
+    local trash_toggle = find_child_recursive(root, GUI_TRASH_STOP)
+    if station_type_dropdown and station_type_dropdown.valid then
+      station_type_dropdown.enabled = not hotkey_only
+    end
+    if fuel_toggle and fuel_toggle.valid then
+      fuel_toggle.enabled = not hotkey_only
+    end
+    if ammo_toggle and ammo_toggle.valid then
+      ammo_toggle.enabled = not hotkey_only
+    end
+    if trash_toggle and trash_toggle.valid then
+      trash_toggle.enabled = not hotkey_only
+    end
+  end
+
+  if hotkey_summary and hotkey_summary.valid then
+    if hotkey_only and edit.kind == "station" then
+      hotkey_summary.caption = {"ff.gui_station_hotkeys_forced"}
+    elseif hotkey_only then
+      hotkey_summary.caption = {"ff.gui_confirm_hotkey_forced"}
+    else
+      hotkey_summary.caption = {"ff.gui_station_hotkeys"}
+    end
+  end
+
+  if hotkey_hint and hotkey_hint.valid then
+    hotkey_hint.visible = hotkey_only
+  end
+end
+
 local function set_active_signal_picker(player_index, element_name)
   if not player_index or not element_name then
     return
@@ -1691,8 +1899,8 @@ function sync_station_route_signal_fields(rec)
     or try_parse_legacy_station_signal(rawget(rec, "stop_name"))
 
   if not signal and is_valid(rec.entity) then
-    local ok, backer_name = pcall(function() return rec.entity.backer_name end)
-    if ok and backer_name and backer_name ~= "" then
+    local backer_name = safe_entity_backer_name(rec.entity, "legacy-station-signal")
+    if backer_name then
       signal = try_parse_legacy_station_signal(backer_name)
     end
   end
@@ -1795,14 +2003,12 @@ function warn_station_noop_power_drain(rec, action_label)
 
   global.ff.noop_power_drain_warning_tick[warning_key] = game.tick
   rec.entity.force.print({"", {"ff.noop_power_drain_warning", station_display_name(rec), action_label}, " ", gps_tag_for_entity(rec.entity)})
-  log(serpent.line({
+  throttled_diagnostic_log("noop_power_drain_log_tick", warning_key, {
     tag = "ff-noop-power-drain",
     tick = game.tick,
     station_unit_number = rec.unit_number,
     action = action_label,
-    position = rec.entity.position,
-    surface = rec.entity.surface and rec.entity.surface.name or nil,
-  }))
+  }, 1)
 end
 
 function warn_station_unexpected_power_drain(rec, previous_energy_j, current_energy_j)
@@ -1827,7 +2033,7 @@ function warn_station_unexpected_power_drain(rec, previous_energy_j, current_ene
     " ",
     gps_tag_for_entity(rec.entity)
   })
-  log(serpent.line({
+  throttled_diagnostic_log("unexpected_power_drain_log_tick", warning_key, {
     tag = "ff-unexpected-power-drain",
     tick = game.tick,
     station_unit_number = rec.unit_number,
@@ -1835,9 +2041,7 @@ function warn_station_unexpected_power_drain(rec, previous_energy_j, current_ene
     current_energy_j = current_energy_j,
     last_spend_tick = rec.last_power_spend_tick,
     last_spend_reason = rec.last_power_spend_reason,
-    surface = rec.entity.surface and rec.entity.surface.name or nil,
-    position = rec.entity.position,
-  }))
+  }, 1)
 end
 
 function warn_freighter_refuel_deadlock(freighter, blocked_fuel_names, shortfall_info)
@@ -1875,16 +2079,14 @@ function warn_freighter_refuel_deadlock(freighter, blocked_fuel_names, shortfall
     gps_tag_for_entity(freighter.entity)
   })
 
-  log(serpent.line({
+  throttled_diagnostic_log("refuel_deadlock_log_tick", tostring(warning_key), {
     tag = "ff-refuel-deadlock",
     tick = game.tick,
     freighter_unit_number = freighter.unit_number,
     blocked_fuels = blocked_fuel_names,
     available_energy = shortfall_info.available_energy,
     trip_energy = shortfall_info.trip_energy,
-    surface = freighter.entity.surface and freighter.entity.surface.name or nil,
-    position = freighter.entity.position,
-  }))
+  }, 1)
 end
 
 function station_label_text(rec)
@@ -1933,9 +2135,7 @@ function sync_station_entity_name(rec)
   if signal then
     plain_name = plain_signal_label(signal) .. " " .. (station_type == "demand" and "Demand" or "Supply")
   end
-  pcall(function()
-    rec.entity.backer_name = plain_name
-  end)
+  try_set_entity_backer_name(rec.entity, plain_name, "sync-station-entity-name")
 end
 
 function station_chart_tag_text(rec)
@@ -2906,7 +3106,7 @@ local function register_freighter(entity)
     rec.network_id = parse_station_network_id(last_died.network_id or rec.network_id)
     -- Try to restore the backer name.
     if last_died.backer_name then
-      pcall(function() entity.backer_name = last_died.backer_name end)
+      try_set_entity_backer_name(entity, last_died.backer_name, "inherit-last-died-freighter-name")
     end
     global.ff.last_died_freighter[entity.force.name] = nil
   end
@@ -6333,6 +6533,18 @@ function station_request_group_choice_state(force, selected_group_name)
             sorted_names[#sorted_names + 1] = normalized_group_name
           end
         end
+      elseif not ok then
+        throttled_diagnostic_log(
+          "logistic_group_query_warning_tick",
+          tostring(force.index or force.name or "nil") .. ":" .. tostring(group_type),
+          {
+            tag = "ff-logistic-group-query-warning",
+            tick = game and game.tick or nil,
+            force_name = force.name,
+            group_type = group_type,
+            error_message = names,
+          }
+        )
       end
     end
 
@@ -6564,15 +6776,19 @@ local function open_station_gui(player, entity)
     add_station_circuit_controls(frame, record)
   end
   add_station_numeric_settings_fields(frame, record)
-  frame.add{type = "label", caption = {"ff.gui_station_hotkeys"}}
+  frame.add{type = "label", name = GUI_HOTKEY_SUMMARY, caption = {"ff.gui_station_hotkeys"}}
   if not is_ghost then
     frame.add{type = "button", name = GUI_OPEN_CARGO, caption = {"ff.gui_open_cargo"}}
   end
+  local hotkey_hint = frame.add{type = "label", name = GUI_HOTKEY_ONLY_HINT, caption = {"ff.gui_hotkey_only_hint"}}
+  hotkey_hint.visible = false
+  hotkey_hint.style.single_line = false
   local spacer = frame.add{type = "empty-widget"}
   spacer.style.height = 8
   local save_button = frame.add{type = "button", name = GUI_SAVE, caption = {"ff.gui_save"}}
   save_button.style = "confirm_button"
   global.ff.player_edit[player.index] = is_ghost and {kind = "station-ghost", entity = entity} or {kind = "station", unit_number = entity.unit_number}
+  apply_hotkey_only_mode_to_open_gui(player.index)
   debug_station_rename(player.index, "open_station_gui", record, signal_picker and signal_picker.elem_value or nil)
   player.opened = frame
   if signal_picker and signal_picker.valid then
@@ -7239,6 +7455,9 @@ local function open_freighter_gui(player, entity)
   add_freighter_schedule_editor(frame, edit)
   local footer = frame.add{type = "flow", direction = "horizontal"}
   footer.style.horizontally_stretchable = true
+  local hotkey_hint = footer.add{type = "label", name = GUI_HOTKEY_ONLY_HINT, caption = {"ff.gui_hotkey_only_hint"}}
+  hotkey_hint.visible = false
+  hotkey_hint.style.single_line = false
   local footer_spacer = footer.add{type = "empty-widget"}
   footer_spacer.style.horizontally_stretchable = true
   if not is_ghost then
@@ -7247,6 +7466,7 @@ local function open_freighter_gui(player, entity)
   end
   local save_button = footer.add{type = "button", name = GUI_SAVE, caption = {"ff.gui_save"}}
   save_button.style = "confirm_button"
+  apply_hotkey_only_mode_to_open_gui(player.index)
   player.opened = frame
   refresh_freighter_schedule_editor(player.index)
   local from_field = find_child_recursive(frame, GUI_FROM)
@@ -7304,12 +7524,16 @@ local function open_map_route_gui(player)
 
   local footer = frame.add{type = "flow", direction = "horizontal"}
   footer.style.horizontally_stretchable = true
+  local hotkey_hint = footer.add{type = "label", name = GUI_HOTKEY_ONLY_HINT, caption = {"ff.gui_hotkey_only_hint"}}
+  hotkey_hint.visible = false
+  hotkey_hint.style.single_line = false
   footer.add{type = "checkbox", name = GUI_FORCE_NOW, state = false, caption = {"ff.gui_force_route_now"}}
   footer.add{type = "button", name = GUI_WAIT_STATUS, caption = {"ff.gui_wait_status"}}
   local footer_spacer = footer.add{type = "empty-widget"}
   footer_spacer.style.horizontally_stretchable = true
   local save_button = footer.add{type = "button", name = GUI_MAP_ROUTE_SAVE, caption = {"ff.gui_save"}}
   save_button.style = "confirm_button"
+  apply_hotkey_only_mode_to_open_gui(player.index)
   player.opened = frame
   refresh_freighter_schedule_editor(player.index)
   local from_field = find_child_recursive(frame, GUI_MAP_ROUTE_FROM)
@@ -7729,6 +7953,9 @@ local function handle_gui_click(event)
     return
   end
   if event.element.name == GUI_SAVE then
+    if player_forces_gui_hotkey_usage(event.player_index) then
+      return
+    end
     save_edit(player, event.player_index)
     return
   end
@@ -7802,6 +8029,9 @@ local function handle_gui_click(event)
     return
   end
   if event.element.name == GUI_MAP_ROUTE_SAVE then
+    if player_forces_gui_hotkey_usage(event.player_index) then
+      return
+    end
     save_edit(player, event.player_index)
   end
 end
@@ -7885,6 +8115,14 @@ local function handle_gui_selection_state_changed(event)
     return
   end
 
+  if event.element.name == GUI_STATION_TYPE and player_forces_gui_hotkey_usage(event.player_index) then
+    local root = player.gui.screen[GUI_ROOT]
+    if root then
+      restore_station_hotkey_only_controls_from_record(event.player_index, root)
+    end
+    return
+  end
+
   if event.element.name ~= GUI_MAP_ROUTE_DROPDOWN then
     return
   end
@@ -7935,9 +8173,27 @@ local function handle_gui_checked_state_changed(event)
     return
   end
 
+  if (element.name == GUI_FUEL_STOP or element.name == GUI_AMMO_STOP or element.name == GUI_TRASH_STOP)
+    and player_forces_gui_hotkey_usage(event.player_index)
+  then
+    local root = player.gui.screen[GUI_ROOT]
+    if root then
+      restore_station_hotkey_only_controls_from_record(event.player_index, root)
+    end
+    return
+  end
+
   if element.name == GUI_COMPLEX_DEMANDS and gui_element_has_ancestor(element, GUI_ROOT) then
     apply_station_gui_controls_to_record(event.player_index)
   end
+end
+
+function handle_runtime_mod_setting_changed(event)
+  if event.setting ~= "ff-force-gui-hotkey-usage" then
+    return
+  end
+
+  apply_hotkey_only_mode_to_open_gui(event.player_index)
 end
 
 local function handle_gui_elem_changed(event)
@@ -8332,6 +8588,7 @@ script.on_event(defines.events.on_gui_confirmed, handle_gui_confirmed)
 script.on_event(defines.events.on_entity_settings_pasted, handle_entity_settings_pasted)
 script.on_event(defines.events.on_player_setup_blueprint, handle_player_setup_blueprint)
 script.on_event(defines.events.on_player_driving_changed_state, on_player_driving_changed_state)
+script.on_event(defines.events.on_runtime_mod_setting_changed, handle_runtime_mod_setting_changed)
 if defines.events.on_player_used_spider_remote then
   script.on_event(defines.events.on_player_used_spider_remote, on_player_used_spider_remote)
 end

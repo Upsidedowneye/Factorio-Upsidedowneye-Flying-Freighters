@@ -21,6 +21,14 @@ end
 -- should receive. Keeping this runtime-global makes it a per-map preference
 -- instead of a machine-wide startup decision.
 settings_to_extend[#settings_to_extend + 1] = {
+  type = "bool-setting",
+  name = "ff-force-gui-hotkey-usage",
+  setting_type = "runtime-per-user",
+  default_value = false,
+  order = "zy[gui-hotkeys]",
+}
+
+settings_to_extend[#settings_to_extend + 1] = {
   type = "string-setting",
   name = "ff-new-freighter-fuel",
   setting_type = "runtime-global",

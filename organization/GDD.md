@@ -68,6 +68,8 @@ The mod currently defines two placeable entities:
 - Pressing the `Shift+F` config hotkey with nothing relevant selected now fails quietly instead of printing a chat warning, and the mod warns players that any other flip binding already using `Shift+F` must be rebound or flips will not work properly.
 - Station ghosts can also be configured before construction through that same custom GUI, and their chosen settings are stored directly on the ghost tags; stop settings copy-paste also works between built stops and station ghosts.
 - The station config GUI now uses Factorio's green confirm-style Save button, and pressing the GUI confirm hotkey (`E`) follows the same save-and-exit path as clicking that button so the confirm sound/UI behavior stays consistent.
+- Adds a per-player runtime setting named `ff-force-gui-hotkey-usage` that can turn matching Flying Freighters GUI actions into hotkey-only controls for that player without affecting anyone else in the same save.
+- When that per-player mode is enabled, built-station config screens disable the clickable Type/Fuel/Ammo/Trash/Save controls and show a hotkey-only hint, while station-ghost screens only force the shared confirm/save action because they do not support the station toggle hotkeys.
 - Uses a large footprint: roughly `8x8` tiles of selection area.
 - Migrates legacy hidden cargo companion contents into the visible station inventory the next time an older save loads after this change.
 - Is used as the main scripted logistics stop.
@@ -95,6 +97,7 @@ The mod currently defines two placeable entities:
 - Is configured as an automated-only transport vehicle.
 - Freighter ghosts can also be configured before construction through the same custom GUI, with their full ordered schedule stored directly on the ghost tags.
 - Freighter config screens, including the map chooser variant, now also use the green confirm-style Save button, and the GUI confirm hotkey (`E`) reuses the same save-and-exit path as the button.
+- That same per-player hotkey-only setting also disables the clickable Save button on freighter and map-route config screens and leaves the existing `E` confirm hotkey as the supported way to commit those screens while the setting is on.
 - Uses default spidertron-style movement behavior again when the spidertron base prototype is available.
 - Uses a hidden/stripped-down spider leg setup so it can use spider vehicle behavior without looking like a normal spidertron.
 - Its hidden spider locomotion leg now suppresses the normal leg-hit smoke puff, zeros the inherited spider-leg walking sound modifiers that still drive tile-specific step audio, and plays a packaged wing-flap sound instead of spidertron footstep audio, so airborne motion no longer throws ground-footstep particles or metallic/surface-step sounds.
@@ -359,9 +362,9 @@ Trash dumping also waits for the chosen trash stop to be fully powered before tr
 
 Trash stops now spend their `100MJ` action charge only when they can actually accept at least one carried stack from the waiting freighter, so a blocked trash stop no longer drains power every tick while no cargo moves.
 
-If a load stop, unload stop, resupply stop, or trash stop still manages to spend its `100MJ` action charge without moving any cargo, fuel, or ammo, the mod now prints a throttled force-chat warning with a GPS ping for that stop so persistent no-op drain bugs can be found in live saves.
+If a load stop, unload stop, resupply stop, or trash stop still manages to spend its current action charge without moving any cargo, fuel, or ammo, the mod now prints a throttled force-chat warning with a GPS ping for that stop so persistent no-op drain bugs can be found in live saves. In the default rules that charge is still `100MJ`; with freighter-network hard mode enabled it instead scales to the square of the number of freighters on that network in MJ.
 
-The station power buffer now also logs every scripted `100MJ` action-spend and emits a separate throttled GPS warning if the hidden station buffer drops between power-state updates without any nearby scripted spend record, which helps distinguish true mystery drains from ordinary post-action recharging. That warning reports the before/after stored energy values in MJ and now shares the same always-available runtime formatter helpers as the rest of the freighter energy diagnostics, so the warning path itself no longer risks crashing `on_tick`.
+The station power buffer now also logs every scripted action-spend and emits a separate throttled GPS warning if the hidden station buffer drops between power-state updates without any nearby scripted spend record, which helps distinguish true mystery drains from ordinary post-action recharging. That warning reports the before/after stored energy values in MJ, omits exact map coordinates from `factorio-current.log`, and now shares the same always-available runtime formatter helpers as the rest of the freighter energy diagnostics, so the warning path itself no longer risks crashing `on_tick`.
 
 Pickup stops now also rebuild the live load manifest before every waiting-load action charge. If the source no longer has enough live stock to bring the freighter up to its configured minimum departure fill, an empty freighter abandons the visit and a partially loaded freighter waits without spending more station power until enough stock accumulates.
 
@@ -465,6 +468,8 @@ Station and freighter settings are currently written into blueprint entity tags.
 Blueprint support is currently implemented for both **stations and freighters**.
 
 For stations, the saved circuit toggles for `set station type from circuit` and `read stop contents` are also preserved through ghosts, copy-paste, and blueprints alongside the existing saved route, role, service flags, charge rate, priority, and network ID.
+
+Malformed or hand-edited blueprint tag payloads are now treated defensively at load/apply time: station demand-request manifests and freighter schedules only go through their normalizers when the incoming tag field is actually a table, so an unexpected scalar/string payload falls back to the default empty behavior instead of risking a runtime error.
 
 ### 8.3 Copy-paste settings
 
