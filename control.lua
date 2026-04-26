@@ -345,19 +345,7 @@ local function station_charge_rate_w(rec)
   if not charge_rate_w or charge_rate_w <= 0 then
     return station_power.default_charge_rate_w
   end
-  return math.min(charge_rate_w, station_power.default_charge_rate_w)
-end
-
-local function station_charge_power_usage_w(rec)
-  -- The hidden station charger now has a prototype-side input-flow cap equal to
-  -- the default station charge rate. ElectricEnergyInterface `power_usage`
-  -- consumes part of that fixed cap before any remaining power can land in the
-  -- internal electric buffer. Burning only the unused portion of the cap turns
-  -- the leftover headroom into the actual buffer-fill rate: default stations get
-  -- the full cap, smaller per-station overrides still slow charging down, and
-  -- the charger no longer deadlocks itself by consuming the entire capped input
-  -- rate before the buffer can store any transfer progress.
-  return math.max(0, station_power.default_charge_rate_w - station_charge_rate_w(rec))
+  return charge_rate_w
 end
 
 local function station_charge_per_tick_j(rec)
@@ -366,6 +354,23 @@ end
 
 local function station_charge_per_update_window_j(rec)
   return station_charge_per_tick_j(rec) * TICK_INTERVAL
+end
+
+local function station_charge_buffer_size_j(rec, current_energy, required_energy_j)
+  -- The helper EEI keeps an intentionally huge prototype-side input limit so
+  -- per-station overrides are not boxed in by data-stage defaults. The real draw
+  -- ceiling comes from how much empty room the script leaves in the EEI buffer
+  -- before the next station-power refresh. Electric networks cannot push more
+  -- than that empty room into the interface, so a buffer window of roughly
+  -- `charge_rate_w / 60` joules per tick behaves like that many watts of maximum
+  -- draw. Because the station power logic only refreshes every `TICK_INTERVAL`
+  -- ticks, the script advances the buffer window by one full update span here so
+  -- the charger can keep drawing at the requested rate between script updates.
+  local charge_window_j = math.max(0, station_charge_per_update_window_j(rec))
+  local capped_required_energy_j = math.max(0, required_energy_j or 0)
+  local capped_current_energy = math.max(0, math.min(capped_required_energy_j, current_energy or 0))
+  local target_energy = math.min(capped_required_energy_j, capped_current_energy + charge_window_j)
+  return math.max(capped_current_energy, target_energy)
 end
 
 function station_transfer_reason_matches_state(reason_key, state)
@@ -2912,9 +2917,9 @@ apply_station_charge_rate_to_power_entity = function(rec)
 
   local required_energy_j = math.max(0, station_transfer_required_energy_j(rec))
   local current_energy = math.max(0, math.min(required_energy_j, power_entity.energy or 0))
-  power_entity.electric_buffer_size = math.max(required_energy_j, current_energy)
+  power_entity.electric_buffer_size = station_charge_buffer_size_j(rec, current_energy, required_energy_j)
   power_entity.power_production = 0
-  power_entity.power_usage = station_charge_power_usage_w(rec)
+  power_entity.power_usage = 0
   if power_entity.energy ~= current_energy then
     power_entity.energy = current_energy
   end
