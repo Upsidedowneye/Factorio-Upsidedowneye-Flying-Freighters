@@ -48,15 +48,15 @@ The mod currently defines two placeable entities:
 - Has `2500` health.
 - Stores cargo directly in the visible station's `480` slot container inventory so inserters and loaders can interact with the station through the engine's normal container handling.
 - Its placeable item explicitly uses `weight = 50000`, so Space Age rockets can carry exactly `20` standard stations per launch; the passive-provider station item uses that same rocket capacity.
-- Charges an internal `100MJ` electric buffer at up to `10MW` with assembler/furnace-style priority (`secondary-input`).
+- Spawns a hidden temporary `electric-energy-interface` only while a cargo, unload, resupply, or trash transfer is actively charging; that helper draws at up to `10MW` by default with assembler/furnace-style priority (`secondary-input`) and is destroyed as soon as the transfer either completes or is canceled.
 - Supports a per-station charge-rate override in the custom station GUI, stored in megawatts and preserved through copy-paste and blueprints.
 - Supports a per-station integer network ID in the custom station GUI; stations only auto-link to other stations on the same network, with `0` as the default network, and the setting is preserved through ghosts, copy-paste, and blueprints.
-- Adds a startup hard mode that gives each freighter its own saved integer network ID in the freighter GUI; while enabled, freighters only interact with stations on that same network, and each station's maximum stored buffer plus per-action energy spend become the square of the number of freighters assigned to that network in MJ.
+- Adds a startup hard mode that gives each freighter its own saved integer network ID in the freighter GUI; while enabled, freighters only interact with stations on that same network, and each station's per-transfer energy spend becomes the square of the number of freighters assigned to that network in MJ.
 - Supports a per-station integer priority override in the custom station GUI, stored on station settings tags and preserved through ghosts, copy-paste, and blueprints.
 - Supports a per-station non-negative Supply buffer count in the custom station GUI; Supply stops can reserve that many empty load freighters to pre-position there in advance while waiting for future stock, and the setting is preserved through ghosts, copy-paste, and blueprints.
-- Supports stop-specific circuit-network integration on the visible station container: the station uses Factorio's native chest circuit settings for normal inventory readout, can switch between Supply and Demand from a selected signed signal (positive = Supply, negative = Demand), can accept live priority and network-ID overrides from selected signals, and always publishes its stored buffer energy on a selected output signal through a hidden companion combinator.
-- Because Factorio 2.1 only exposes EEI input-flow limits as runtime getters, the per-station charge-rate override is enforced by shrinking the hidden EEI companion's available buffer headroom each 30-tick station update to the amount of energy the stop is allowed to gain before the next refresh; this keeps the prototype's generous input ceiling for flexibility while making the station charge like a capped battery refill instead of a constant sink.
-- Spends `100MJ` from that buffer each time the station sends or receives a freighter interaction.
+- Supports stop-specific circuit-network integration on the visible station container: the station uses Factorio's native chest circuit settings for normal inventory readout, can switch between Supply and Demand from a selected signed signal (positive = Supply, negative = Demand), can accept live priority and network-ID overrides from selected signals, and always publishes the current active transfer's accumulated charge in whole megajoules on a selected output signal through a hidden companion combinator.
+- The temporary EEI tracks transfer progress by accumulating real energy from the electric network at the station's configured rate. Partial-power ticks therefore carry forward automatically: if the network only feeds part of the requested wattage this tick, the transfer simply finishes later instead of snapping between empty/full battery behavior.
+- Spends `100MJ` per transfer in the default rules, but only after that much energy has actually been absorbed by the active temporary EEI.
 - Keeps the power entity hidden and non-operable while the visible station remains the actual cargo container, so opening the station stays on the normal inventory path instead of exposing EEI controls.
 - When a station is mined, destroyed, or otherwise removed, the mod now explicitly sweeps the tile for any hidden cargo/power/circuit helper companions so invisible leftover helper entities do not remain behind.
 - When a station record is rebuilt on load or runtime rescan, the script now also collapses any duplicate hidden cargo/power/circuit helper stack back down to one helper per prototype and rebinds the record to that survivor, which prevents old saves from accumulating thousands of renderable `empty.png` helper sprites at one stop.
@@ -169,7 +169,7 @@ Stops now have a dedicated circuit-control layer that does not reuse the route-k
 - a GUI toggle can make the stop's effective type follow a selected signed signal, where positive values mean Supply and negative values mean Demand,
 - a selected signal can override the saved stop priority while present,
 - a selected signal can override the saved network ID while present,
-- a selected signal always carries the stop's current stored buffer energy in whole megajoules,
+- a selected signal always carries the stop's current active-transfer charge in whole megajoules,
 - and normal inventory readout remains entirely on Factorio's native chest circuit settings.
 
 For built stops, the saved circuit toggle and the four signal pickers now live in a dedicated Flying Freighters panel attached to the right side of the vanilla container GUI, and that panel is hidden entirely until the stop has a real red or green wire connection; station ghosts expose the same controls in a matching Flying Freighters side panel anchored beside Factorio's native ghost picker GUI, with the custom popup kept for the remaining stop settings.
@@ -191,9 +191,7 @@ Additional independent station flags are also implemented:
 
 These flags are orthogonal to the main supply/demand role and are used by resupply and forced route-change logic.
 
-Regardless of role, a stop must also be **fully powered** before freighters will use it.
-
-Internally, the visible station entity now acts like an accumulator-style power buffer: it charges through Factorio's normal electric network at up to `10MW`, then scripted station actions spend energy from that stored buffer when a freighter sends from, unloads into, resupplies at, or dumps trash into the stop. In the default mode that spend stays at `100MJ`, while the hard-mode startup setting instead makes both the action spend and the station's max stored energy equal to $n^2$ MJ for that station network, where $n$ is the number of freighters assigned to the same network ID.
+Stops no longer need to sit precharged before freighters can use them. A freighter may still choose any valid matching stop immediately, but the actual transfer waits at the dock until the stop's temporary hidden EEI has absorbed enough energy for that specific action. In the default mode that spend stays at `100MJ`; with the hard-mode startup setting enabled it instead scales to $n^2$ MJ for that station network, where $n$ is the number of freighters assigned to the same network ID.
 
 ### 4.3 Freighters have a looping multi-stop schedule
 
@@ -240,16 +238,15 @@ When idle, a freighter looks for:
 - any non-demand station matching its `from` signal,
 - any demand station matching its `to` signal,
 - only stops on the freighter's current surface,
-- only stops whose visible station power buffer currently contains at least one `100MJ` action charge,
 - an item present at the source that is not considered defense ammo,
 - enough source stock to satisfy the active leg's minimum departure-load percentage for that item,
 - enough effective room at the destination to satisfy that same minimum departure requirement after subtracting matching cargo already in motion or waiting to unload from other freighters.
 
 It only considers source and destination stops that share the same network ID. Within that filtered set, it prefers higher-priority destination stops first, then higher-priority source stops, and only then falls back to transferable amount, source-vs-destination stock difference, and shorter route distance.
 
-For `load` stops, the route chooser instead looks only for one powered matching pickup stop on the current network that can add non-defense cargo into the freighter; if the next schedule leg is an `unload` leg and that target demand station still has its complex-demand checkbox enabled, that pickup cargo is limited to what the chosen destination can accept right now. For `unload` stops, it looks only for one powered matching demand stop on the current network that can satisfy any of that stop's configured demand requests from the freighter's currently carried cargo when that station keeps complex demands enabled, then rechecks that live demand again during the actual unload transfer; with the checkbox disabled on that station, the demand stop simply accepts any carried cargo it still has room for.
+For `load` stops, the route chooser instead looks only for one matching pickup stop on the current network that can add non-defense cargo into the freighter; if the next schedule leg is an `unload` leg and that target demand station still has its complex-demand checkbox enabled, that pickup cargo is limited to what the chosen destination can accept right now. For `unload` stops, it looks only for one matching demand stop on the current network that can satisfy any of that stop's configured demand requests from the freighter's currently carried cargo when that station keeps complex demands enabled, then rechecks that live demand again during the actual unload transfer; with the checkbox disabled on that station, the demand stop simply accepts any carried cargo it still has room for.
 
-If a `load` leg has no route that can depart yet, the freighter now pre-positions at the best powered matching pickup stop only when that source signal is oversubscribed on the current surface/network, meaning there are more relevant load-leg freighters than usable supply stops for that signal. While parked at that source, it keeps reevaluating live cargo and paired unload demand until the leg can finally leave.
+If a `load` leg has no route that can depart yet, the freighter now pre-positions at the best matching pickup stop only when that source signal is oversubscribed on the current surface/network, meaning there are more relevant load-leg freighters than usable supply stops for that signal. While parked at that source, it keeps reevaluating live cargo and paired unload demand until the leg can finally leave.
 
 ### 5.2 Cargo loading and unloading
 
@@ -327,11 +324,11 @@ That automatic leftover-fuel dump is also controlled per schedule leg. If trash 
 
 Freighters marked for deconstruction also stop participating in logistics entirely while the mark is present: they do not depart, travel, unload, or resupply, and any temporary route claim is released until the mark is cleared.
 
-Resupply stops that are not fully powered are ignored until their power buffer is filled again.
+Resupply, ammo, fuel, and trash stops are no longer ignored just because they are not already charged; they are eligible immediately, but the actual transfer waits for that stop's temporary transfer EEI to accumulate the required energy.
 
 When a freighter already has an active pickup, delivery, or forced-dump context, automated fuel/ammo/trash stop selection stays inside that same station network so service traffic does not silently bridge separate logistics networks.
 
-Resupply stops also now spend their `100MJ` action charge only when they can actually transfer fuel and/or ammo into the freighter, so a no-op refuel wait no longer drains station power. If a freighter reaches a resupply stop and is already topped up enough that no further transfer is needed, it now clears that wait instead of idling there indefinitely. Manual freighter schedule edits now also cancel a deadlocked fuel/ammo interrupt wait when the current interrupt stop is powered but cannot actually transfer any of the needed resupply items, so queued schedule changes are applied immediately instead of being held hostage until that stop eventually stocks the missing item. Fuel and ammo interrupts now also wait until the stop has enough stock to top off the freighter's current burner-slot refill or preferred capsule-ammo refill in one visit before spending that `100MJ` action charge, so trickle-fed stops no longer burn one full action on one-item dribbles.
+Resupply stops also now spend their `100MJ` action charge only when they can actually transfer fuel and/or ammo into the freighter, so a no-op refuel wait no longer drains station power. If a freighter reaches a resupply stop and is already topped up enough that no further transfer is needed, it now clears that wait instead of idling there indefinitely. Manual freighter schedule edits now also cancel a deadlocked fuel/ammo interrupt wait when the current interrupt stop cannot actually transfer any of the needed resupply items, so queued schedule changes are applied immediately instead of being held hostage until that stop eventually stocks the missing item. Fuel and ammo interrupts now also wait until the stop has enough stock to top off the freighter's current burner-slot refill or preferred capsule-ammo refill in one visit before spending that `100MJ` action charge, so trickle-fed stops no longer burn one full action on one-item dribbles.
 
 ### 6.2 Ammo system
 
@@ -344,7 +341,7 @@ Implemented behavior:
 - prefers a built-in priority list if those items exist,
 - can pull that ammo from an ammo stop into the freighter's ammo inventory,
 - and that ammo-stop detour is now controlled by the active schedule leg's ammo-interrupt toggle.
-- attempts to keep the freighter above a minimum ammo count when at least one powered ammo stop is available,
+- attempts to keep the freighter above a minimum ammo count when at least one ammo stop is available,
 - excludes recognized defense ammo from normal cargo route selection.
 
 Combat deployment behavior is not presently implemented beyond relying on the vehicle weapon/ammo setup.
@@ -358,19 +355,17 @@ Trash stops are currently used for two purposes:
 
 If the player forces a route change while the freighter still has cargo, the freighter tries to find the nearest trash stop, dump all carried items there, and then apply the new route.
 
-Trash dumping also waits for the chosen trash stop to be fully powered before transfer resumes.
+Trash dumping waits for the chosen trash stop's active transfer charge to finish before cargo moves.
 
 Trash stops now spend their `100MJ` action charge only when they can actually accept at least one carried stack from the waiting freighter, so a blocked trash stop no longer drains power every tick while no cargo moves.
 
 If a load stop, unload stop, resupply stop, or trash stop still manages to spend its current action charge without moving any cargo, fuel, or ammo, the mod now prints a throttled force-chat warning with a GPS ping for that stop so persistent no-op drain bugs can be found in live saves. In the default rules that charge is still `100MJ`; with freighter-network hard mode enabled it instead scales to the square of the number of freighters on that network in MJ.
 
-The station power buffer now also logs every scripted action-spend and emits a separate throttled GPS warning if the hidden station buffer drops between power-state updates without any nearby scripted spend record, which helps distinguish true mystery drains from ordinary post-action recharging. That warning reports the before/after stored energy values in MJ, omits exact map coordinates from `factorio-current.log`, and now shares the same always-available runtime formatter helpers as the rest of the freighter energy diagnostics, so the warning path itself no longer risks crashing `on_tick`.
-
 Pickup stops now also rebuild the live load manifest before every waiting-load action charge. If the source no longer has enough live stock to bring the freighter up to its configured minimum departure fill, an empty freighter abandons the visit and a partially loaded freighter waits without spending more station power until enough stock accumulates.
 
 ## 7. Player Interface
 
-The freighter configuration GUI now includes a `What is this freighter waiting on?` button that prints the current blocker to the player chat. The explanation covers route setup, damaged freighters, source/destination stop power, the current burner-power-based trip fuel estimate, current fuel shortfall, source stock, destination capacity, resupply availability, inventory-space blockers at resupply, and other common reasons a freighter can remain idle or stalled.
+The freighter configuration GUI now includes a `What is this freighter waiting on?` button that prints the current blocker to the player chat. The explanation covers route setup, damaged freighters, active source/destination transfer charging, the current burner-power-based trip fuel estimate, current fuel shortfall, source stock, destination capacity, resupply availability, inventory-space blockers at resupply, and other common reasons a freighter can remain idle or stalled.
 
 ### 7.1 Station GUI
 
