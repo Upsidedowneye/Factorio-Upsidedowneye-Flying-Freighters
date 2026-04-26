@@ -1,0 +1,10 @@
+{
+  "name": "upsidedowneye-flying-freighters",
+  "version": "0.9.0",
+  "factorio_version": "2.0",
+  "title": "Flying Freighters",
+  "author": "Upsidedowneye",
+  "homepage": "https://steamcommunity.com/id/Upsidedowneye/",
+  "dependencies": ["base >= 2.0", "? space-age", "? RampantArsenalFork"],
+  "description": "Flying Freighters are a mix between trains and bots. They are typically better than trains and bots in most situations, but shouldn't make trains or bots obsolete."
+}
