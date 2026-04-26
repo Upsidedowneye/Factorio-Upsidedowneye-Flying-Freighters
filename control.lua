@@ -164,6 +164,18 @@ local function remove_unit_from_tick_bucket(bucket_sets, unit_number)
   end
 end
 
+function mark_station_power_transfer_active(rec)
+  if rec and rec.unit_number and global and global.ff and global.ff.active_station_power_units then
+    global.ff.active_station_power_units[rec.unit_number] = true
+  end
+end
+
+function clear_station_power_transfer_active(rec)
+  if rec and rec.unit_number and global and global.ff and global.ff.active_station_power_units then
+    global.ff.active_station_power_units[rec.unit_number] = nil
+  end
+end
+
 function find_child_recursive(element, child_name)
   if not element or not element.valid then
     return nil
@@ -349,28 +361,35 @@ local function station_charge_rate_w(rec)
 end
 
 local function station_charge_per_tick_j(rec)
-  return station_charge_rate_w(rec) / 60
+  return math.max(0, math.floor((station_charge_rate_w(rec) / 60) + 0.5))
 end
 
-local function station_charge_per_update_window_j(rec)
-  return station_charge_per_tick_j(rec) * TICK_INTERVAL
-end
-
-local function station_charge_buffer_size_j(rec, current_energy, required_energy_j)
-  -- The helper EEI keeps an intentionally huge prototype-side input limit so
-  -- per-station overrides are not boxed in by data-stage defaults. The real draw
-  -- ceiling comes from how much empty room the script leaves in the EEI buffer
-  -- before the next station-power refresh. Electric networks cannot push more
-  -- than that empty room into the interface, so a buffer window of roughly
-  -- `charge_rate_w / 60` joules per tick behaves like that many watts of maximum
-  -- draw. Because the station power logic only refreshes every `TICK_INTERVAL`
-  -- ticks, the script advances the buffer window by one full update span here so
-  -- the charger can keep drawing at the requested rate between script updates.
-  local charge_window_j = math.max(0, station_charge_per_update_window_j(rec))
+function station_transfer_progress_j(rec, required_energy_j)
   local capped_required_energy_j = math.max(0, required_energy_j or 0)
-  local capped_current_energy = math.max(0, math.min(capped_required_energy_j, current_energy or 0))
-  local target_energy = math.min(capped_required_energy_j, capped_current_energy + charge_window_j)
-  return math.max(capped_current_energy, target_energy)
+  local stored_progress_j = tonumber(rec and rawget(rec, "power_transfer_progress_j") or nil) or 0
+  return math.max(0, math.min(capped_required_energy_j, stored_progress_j))
+end
+
+function set_station_transfer_progress_j(rec, progress_j, required_energy_j)
+  if not rec then
+    return 0
+  end
+  local capped_required_energy_j = math.max(0, required_energy_j or 0)
+  local capped_progress_j = math.max(0, math.min(capped_required_energy_j, progress_j or 0))
+  rec.power_transfer_progress_j = capped_progress_j > 0 and capped_progress_j or nil
+  return capped_progress_j
+end
+
+local function station_charge_buffer_size_j(rec, stored_progress_j, required_energy_j)
+  -- The helper EEI now uses its runtime buffer strictly as a one-tick intake
+  -- window instead of as the long-term transfer progress store. The script keeps
+  -- cumulative station charge progress on the stop record itself, harvests any
+  -- joules the EEI absorbed since the previous tick, resets the EEI energy back
+  -- to zero, and then reopens only one tick of empty buffer. That means a
+  -- `10MW` station exposes about `166667J` of empty room each tick instead of a
+  -- multi-megajoule burst window every `TICK_INTERVAL` ticks.
+  local remaining_energy_j = math.max(0, math.max(0, required_energy_j or 0) - math.max(0, stored_progress_j or 0))
+  return math.min(remaining_energy_j, station_charge_per_tick_j(rec))
 end
 
 function station_transfer_reason_matches_state(reason_key, state)
@@ -899,6 +918,7 @@ function ensure_state()
   runtime_global.ff.open_config_conflict_warning_shown = runtime_global.ff.open_config_conflict_warning_shown or {}
   runtime_global.ff.noop_power_drain_warning_tick = runtime_global.ff.noop_power_drain_warning_tick or {}
   runtime_global.ff.unexpected_power_drain_warning_tick = runtime_global.ff.unexpected_power_drain_warning_tick or {}
+  runtime_global.ff.active_station_power_units = runtime_global.ff.active_station_power_units or {}
   runtime_global.ff.inbound_reservations = runtime_global.ff.inbound_reservations or {}
   if not runtime_global.ff.station_units_by_tick_bucket then
     runtime_global.ff.station_units_by_tick_bucket = create_tick_bucket_sets()
@@ -911,6 +931,15 @@ function ensure_state()
     for unit_number in pairs(runtime_global.ff.freighters) do
       add_unit_to_tick_bucket(runtime_global.ff.freighter_units_by_tick_bucket, unit_number)
     end
+  end
+  if runtime_global.ff.active_station_power_units_built ~= true then
+    runtime_global.ff.active_station_power_units = {}
+    for unit_number, rec in pairs(runtime_global.ff.stations) do
+      if rec and station_transfer_owner_is_active(rec) then
+        runtime_global.ff.active_station_power_units[unit_number] = true
+      end
+    end
+    runtime_global.ff.active_station_power_units_built = true
   end
   if runtime_global.ff.inbound_reservations_built ~= true then
     runtime_global.ff.inbound_reservations = {}
@@ -2655,6 +2684,7 @@ local function register_station(entity)
     power_transfer_owner_unit_number = nil,
     power_transfer_reason = nil,
     power_transfer_required_j = nil,
+    power_transfer_progress_j = nil,
   }
   unindex_station_record(rec)
   rec.entity = entity
@@ -2692,6 +2722,8 @@ local function register_station(entity)
   rec.position = {x = entity.position.x, y = entity.position.y}
   rec.stop_fully_powered = rec.stop_fully_powered == true
   rec.power_unit_number = nil
+  local saved_power_transfer_progress_j = tonumber(rawget(rec, "power_transfer_progress_j"))
+  rec.power_transfer_progress_j = (saved_power_transfer_progress_j and saved_power_transfer_progress_j > 0) and saved_power_transfer_progress_j or nil
   ensure_station_cargo_entity(rec)
   ensure_station_circuit_entity(rec)
   dedupe_station_hidden_companions(rec)
@@ -2916,13 +2948,32 @@ apply_station_charge_rate_to_power_entity = function(rec)
   end
 
   local required_energy_j = math.max(0, station_transfer_required_energy_j(rec))
-  local current_energy = math.max(0, math.min(required_energy_j, power_entity.energy or 0))
-  power_entity.electric_buffer_size = station_charge_buffer_size_j(rec, current_energy, required_energy_j)
+  local harvested_energy_j = math.max(0, power_entity.energy or 0)
+  local stored_progress_j = station_transfer_progress_j(rec, required_energy_j)
+  if harvested_energy_j > 0 then
+    stored_progress_j = math.min(required_energy_j, stored_progress_j + harvested_energy_j)
+  end
+  stored_progress_j = set_station_transfer_progress_j(rec, stored_progress_j, required_energy_j)
+  local assigned_buffer_size_j = station_charge_buffer_size_j(rec, stored_progress_j, required_energy_j)
+  log(serpent.line({
+    tag = "ff-station-buffer-size-debug",
+    tick = game and game.tick or nil,
+    station_unit_number = rec.unit_number,
+    station_name = is_valid(rec.entity) and rec.entity.backer_name or nil,
+    power_unit_number = power_entity.unit_number,
+    transfer_reason = rawget(rec, "power_transfer_reason"),
+    charge_rate_w = station_charge_rate_w(rec),
+    harvested_energy_j = harvested_energy_j,
+    required_energy_j = required_energy_j,
+    transfer_progress_j = stored_progress_j,
+    assigned_buffer_size_j = assigned_buffer_size_j,
+  }))
   power_entity.power_production = 0
   power_entity.power_usage = 0
-  if power_entity.energy ~= current_energy then
-    power_entity.energy = current_energy
+  if power_entity.energy ~= 0 then
+    power_entity.energy = 0
   end
+  power_entity.electric_buffer_size = assigned_buffer_size_j
   rec.power_transfer_required_j = required_energy_j
   rec.power_unit_number = power_entity.unit_number
   return power_entity
@@ -2941,6 +2992,8 @@ function destroy_station_power_entity(rec)
     rec.power_transfer_owner_unit_number = nil
     rec.power_transfer_reason = nil
     rec.power_transfer_required_j = nil
+    rec.power_transfer_progress_j = nil
+    clear_station_power_transfer_active(rec)
   end
 end
 
@@ -3011,6 +3064,8 @@ function destroy_station_hidden_companions(anchor_entity, rec)
       rec.power_transfer_owner_unit_number = nil
       rec.power_transfer_reason = nil
       rec.power_transfer_required_j = nil
+      rec.power_transfer_progress_j = nil
+      clear_station_power_transfer_active(rec)
     end
     return
   end
@@ -3037,6 +3092,8 @@ function destroy_station_hidden_companions(anchor_entity, rec)
     rec.power_transfer_owner_unit_number = nil
     rec.power_transfer_reason = nil
     rec.power_transfer_required_j = nil
+    rec.power_transfer_progress_j = nil
+    clear_station_power_transfer_active(rec)
   end
 end
 
@@ -3046,11 +3103,13 @@ station_has_full_power = function(rec)
 end
 
 local function station_available_energy(rec)
+  local required_energy_j = math.max(0, station_transfer_required_energy_j(rec))
+  local available_energy = station_transfer_progress_j(rec, required_energy_j)
   local power_entity = get_station_power_entity(rec)
   if not power_entity or not power_entity.valid then
-    return 0
+    return available_energy
   end
-  return math.max(0, power_entity.energy or 0)
+  return math.max(0, math.min(required_energy_j, available_energy + math.max(0, power_entity.energy or 0)))
 end
 
 local function refresh_station_power_record(rec)
@@ -3099,6 +3158,8 @@ local function consume_station_action_energy(rec, reason_key, owner_unit_number)
     rec.power_transfer_owner_unit_number = owner_unit_number
     rec.power_transfer_reason = reason_key
     rec.power_transfer_required_j = action_energy_j
+    rec.power_transfer_progress_j = nil
+    mark_station_power_transfer_active(rec)
   end
 
   local power_entity = apply_station_charge_rate_to_power_entity(rec)
@@ -3107,7 +3168,7 @@ local function consume_station_action_energy(rec, reason_key, owner_unit_number)
     return false
   end
 
-  local available_energy = math.max(0, math.min(action_energy_j, power_entity.energy or 0))
+  local available_energy = station_available_energy(rec)
   rec.last_power_energy_j = available_energy
   rec.stop_power_ratio = action_energy_j > 0 and math.max(0, math.min(1, available_energy / action_energy_j)) or 0
   rec.stop_fully_powered = available_energy >= action_energy_j
@@ -3321,7 +3382,7 @@ local function update_station_power_states_in_bucket(bucket_index)
   local station_bucket = global.ff.station_units_by_tick_bucket[bucket_index] or {}
   for unit in pairs(station_bucket) do
     local rec = global.ff.stations[unit]
-    if rec and is_valid(rec.entity) then
+    if rec and is_valid(rec.entity) and not station_transfer_owner_is_active(rec) then
       local power_entity = apply_station_charge_rate_to_power_entity(rec)
       ensure_station_circuit_entity(rec)
       if power_entity and power_entity.valid then
@@ -3346,6 +3407,34 @@ local function update_station_power_states_in_bucket(bucket_index)
       rec.power_unit_number = nil
       rec.last_power_energy_j = 0
       refresh_station_circuit_state(rec)
+    end
+  end
+end
+
+function update_active_station_power_states()
+  for unit in pairs(global.ff.active_station_power_units or {}) do
+    local rec = global.ff.stations[unit]
+    if rec and is_valid(rec.entity) and station_transfer_owner_is_active(rec) then
+      local power_entity = apply_station_charge_rate_to_power_entity(rec)
+      ensure_station_circuit_entity(rec)
+      if power_entity and power_entity.valid then
+        local buffer_capacity_j = station_transfer_required_energy_j(rec)
+        local current_energy = station_available_energy(rec)
+        local ratio = buffer_capacity_j > 0 and math.max(0, math.min(1, current_energy / buffer_capacity_j)) or 0
+        rec.stop_power_ratio = ratio
+        rec.power_unit_number = power_entity.unit_number
+        rec.stop_fully_powered = buffer_capacity_j > 0 and current_energy >= buffer_capacity_j
+        rec.last_power_energy_j = current_energy
+        refresh_station_circuit_state(rec)
+      else
+        rec.stop_power_ratio = 0
+        rec.stop_fully_powered = false
+        rec.power_unit_number = nil
+        rec.last_power_energy_j = 0
+        refresh_station_circuit_state(rec)
+      end
+    else
+      global.ff.active_station_power_units[unit] = nil
     end
   end
 end
@@ -8699,6 +8788,7 @@ script.on_event(defines.events.on_tick, function(event)
   if global.ff.cleanup_dirty or event.tick % CLEANUP_SWEEP_INTERVAL == 0 then
     cleanup_invalid_entities_in_bucket(tick_bucket)
   end
+  update_active_station_power_states()
   update_station_power_states_in_bucket(tick_bucket)
 
   for unit in pairs(global.ff.freighter_units_by_tick_bucket[tick_bucket] or {}) do
