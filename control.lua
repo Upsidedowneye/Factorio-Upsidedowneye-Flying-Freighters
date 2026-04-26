@@ -345,7 +345,19 @@ local function station_charge_rate_w(rec)
   if not charge_rate_w or charge_rate_w <= 0 then
     return station_power.default_charge_rate_w
   end
-  return charge_rate_w
+  return math.min(charge_rate_w, station_power.default_charge_rate_w)
+end
+
+local function station_charge_power_usage_w(rec)
+  -- The hidden station charger now has a prototype-side input-flow cap equal to
+  -- the default station charge rate. ElectricEnergyInterface `power_usage`
+  -- consumes part of that fixed cap before any remaining power can land in the
+  -- internal electric buffer. Burning only the unused portion of the cap turns
+  -- the leftover headroom into the actual buffer-fill rate: default stations get
+  -- the full cap, smaller per-station overrides still slow charging down, and
+  -- the charger no longer deadlocks itself by consuming the entire capped input
+  -- rate before the buffer can store any transfer progress.
+  return math.max(0, station_power.default_charge_rate_w - station_charge_rate_w(rec))
 end
 
 local function station_charge_per_tick_j(rec)
@@ -2902,7 +2914,7 @@ apply_station_charge_rate_to_power_entity = function(rec)
   local current_energy = math.max(0, math.min(required_energy_j, power_entity.energy or 0))
   power_entity.electric_buffer_size = math.max(required_energy_j, current_energy)
   power_entity.power_production = 0
-  power_entity.power_usage = math.max(0, station_charge_rate_w(rec))
+  power_entity.power_usage = station_charge_power_usage_w(rec)
   if power_entity.energy ~= current_energy then
     power_entity.energy = current_energy
   end

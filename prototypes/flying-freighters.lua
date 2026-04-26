@@ -103,6 +103,26 @@ local function tinted_spidertron_icon(scale)
   }
 end
 
+-- The hidden station charger is an ElectricEnergyInterface, so its actual
+-- network draw ceiling comes from the prototype's input flow limit rather than
+-- from the runtime `power_usage` field alone. Keep this helper tied to the
+-- shared default charge-rate constant so the prototype-level cap stays aligned
+-- with the station charging design instead of silently falling back to an
+-- unrealistic placeholder like `100GW`.
+local function format_watt_limit_string(watts)
+  local whole_watts = math.max(0, math.floor(watts or 0))
+  if whole_watts % 1000000000 == 0 then
+    return tostring(whole_watts / 1000000000) .. "GW"
+  end
+  if whole_watts % 1000000 == 0 then
+    return tostring(whole_watts / 1000000) .. "MW"
+  end
+  if whole_watts % 1000 == 0 then
+    return tostring(whole_watts / 1000) .. "kW"
+  end
+  return tostring(whole_watts) .. "W"
+end
+
 local function cargo_pad_layer(name, width, height, shift, opts)
   local base_shift = shift or {0, -1}
   local layer = {
@@ -258,7 +278,7 @@ station_power.energy_source = {
   type = "electric",
   buffer_capacity = tostring(math.floor(station_power_defaults.buffer_j / 1000000)) .. "MJ",
   usage_priority = "secondary-input",
-  input_flow_limit = "100GW",
+  input_flow_limit = format_watt_limit_string(station_power_defaults.default_charge_rate_w),
   output_flow_limit = "0W",
 }
 station_power.energy_production = "0W"
