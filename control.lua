@@ -2911,7 +2911,7 @@ apply_station_charge_rate_to_power_entity = function(rec)
   return power_entity
 end
 
-local function destroy_station_power_entity(rec)
+function destroy_station_power_entity(rec)
   if rec then
     local power_entity = get_station_power_entity(rec)
     if power_entity and power_entity.valid then
