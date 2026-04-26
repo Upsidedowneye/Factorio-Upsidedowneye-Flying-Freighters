@@ -356,6 +356,48 @@ local function station_charge_per_update_window_j(rec)
   return station_charge_per_tick_j(rec) * TICK_INTERVAL
 end
 
+function station_transfer_reason_matches_state(reason_key, state)
+  if reason_key == "waiting-load" then
+    return state == "waiting_load"
+  end
+  if reason_key == "waiting-unload" then
+    return state == "waiting_unload"
+  end
+  if reason_key == "waiting-resupply" then
+    return state == "waiting_resupply"
+  end
+  if reason_key == "waiting-force-dump" then
+    return state == "waiting_force_dump"
+  end
+  return false
+end
+
+function station_transfer_required_energy_j(rec)
+  local required_energy_j = tonumber(rec and rawget(rec, "power_transfer_required_j") or nil)
+  if required_energy_j and required_energy_j > 0 then
+    return required_energy_j
+  end
+  return station_action_energy_j(rec)
+end
+
+function station_transfer_owner_is_active(rec)
+  local owner_unit_number = rec and rawget(rec, "power_transfer_owner_unit_number") or nil
+  if not owner_unit_number then
+    return false
+  end
+
+  local freighter = global.ff.freighters[owner_unit_number]
+  if not freighter or not is_valid(freighter.entity) then
+    return false
+  end
+
+  if freighter.target_station ~= rec.unit_number and freighter.source_station ~= rec.unit_number then
+    return false
+  end
+
+  return station_transfer_reason_matches_state(rawget(rec, "power_transfer_reason"), freighter.state)
+end
+
 function count_freighters_on_network(network_id, cache)
   local normalized_network_id = parse_station_network_id(network_id)
   cache = cache or get_runtime_cycle_cache()
@@ -2367,7 +2409,7 @@ function apply_station_settings_tags(rec, tags)
   rec.priority = parse_station_priority(settings.priority)
   rec.supply_buffer_count = parse_station_supply_buffer_count(settings.supply_buffer_count)
   rec.network_id = parse_station_network_id(settings.network_id)
-  apply_station_charge_rate_to_power_entity(rec)
+  refresh_station_power_record(rec)
   sync_station_route_signal_fields(rec)
   refresh_station_circuit_state(rec)
   index_station_record(rec)
@@ -2593,6 +2635,9 @@ local function register_station(entity)
     power_unit_number = nil,
     circuit_unit_number = nil,
     last_power_energy_j = nil,
+    power_transfer_owner_unit_number = nil,
+    power_transfer_reason = nil,
+    power_transfer_required_j = nil,
   }
   unindex_station_record(rec)
   rec.entity = entity
@@ -2630,7 +2675,6 @@ local function register_station(entity)
   rec.position = {x = entity.position.x, y = entity.position.y}
   rec.stop_fully_powered = rec.stop_fully_powered == true
   rec.power_unit_number = nil
-  apply_station_charge_rate_to_power_entity(rec)
   ensure_station_cargo_entity(rec)
   ensure_station_circuit_entity(rec)
   dedupe_station_hidden_companions(rec)
@@ -2840,31 +2884,29 @@ local function ensure_station_power_entity(rec)
 end
 
 apply_station_charge_rate_to_power_entity = function(rec)
+  if not rec or not is_valid(rec.entity) then
+    return nil
+  end
+
+  if not station_transfer_owner_is_active(rec) then
+    destroy_station_power_entity(rec)
+    return nil
+  end
+
   local power_entity = ensure_station_power_entity(rec)
   if not power_entity or not power_entity.valid then
     return nil
   end
 
-  local buffer_capacity_j = station_buffer_capacity_j(rec)
-  local current_energy = math.max(0, math.min(buffer_capacity_j, power_entity.energy or 0))
-  local is_buffer_full = current_energy >= (buffer_capacity_j - 1)
-  -- Factorio 2.1 only exposes EEI input flow limits as getters at runtime, so
-  -- the per-station charge cap has to be modeled by limiting how much empty
-  -- buffer space the hidden EEI presents during each station power update.
-  -- This makes the station absorb only as much energy as it is allowed to gain
-  -- before the next bucket refresh instead of behaving like a constant sink.
-  local allowed_energy_gain_j = math.max(0, station_charge_per_update_window_j(rec))
-  local target_buffer_size = buffer_capacity_j
-  if not is_buffer_full then
-    target_buffer_size = math.min(buffer_capacity_j, current_energy + allowed_energy_gain_j)
-  end
-
-  power_entity.electric_buffer_size = math.max(current_energy, target_buffer_size)
+  local required_energy_j = math.max(0, station_transfer_required_energy_j(rec))
+  local current_energy = math.max(0, math.min(required_energy_j, power_entity.energy or 0))
+  power_entity.electric_buffer_size = math.max(required_energy_j, current_energy)
   power_entity.power_production = 0
-  power_entity.power_usage = 0
+  power_entity.power_usage = math.max(0, station_charge_rate_w(rec))
   if power_entity.energy ~= current_energy then
     power_entity.energy = current_energy
   end
+  rec.power_transfer_required_j = required_energy_j
   rec.power_unit_number = power_entity.unit_number
   return power_entity
 end
@@ -2878,6 +2920,10 @@ local function destroy_station_power_entity(rec)
     rec.power_unit_number = nil
     rec.stop_power_ratio = 0
     rec.stop_fully_powered = false
+    rec.last_power_energy_j = 0
+    rec.power_transfer_owner_unit_number = nil
+    rec.power_transfer_reason = nil
+    rec.power_transfer_required_j = nil
   end
 end
 
@@ -2944,6 +2990,10 @@ function destroy_station_hidden_companions(anchor_entity, rec)
       rec.circuit_unit_number = nil
       rec.stop_power_ratio = 0
       rec.stop_fully_powered = false
+      rec.last_power_energy_j = 0
+      rec.power_transfer_owner_unit_number = nil
+      rec.power_transfer_reason = nil
+      rec.power_transfer_required_j = nil
     end
     return
   end
@@ -2966,6 +3016,10 @@ function destroy_station_hidden_companions(anchor_entity, rec)
     rec.circuit_unit_number = nil
     rec.stop_power_ratio = 0
     rec.stop_fully_powered = false
+    rec.last_power_energy_j = 0
+    rec.power_transfer_owner_unit_number = nil
+    rec.power_transfer_reason = nil
+    rec.power_transfer_required_j = nil
   end
 end
 
@@ -2975,7 +3029,7 @@ station_has_full_power = function(rec)
 end
 
 local function station_available_energy(rec)
-  local power_entity = ensure_station_power_entity(rec)
+  local power_entity = get_station_power_entity(rec)
   if not power_entity or not power_entity.valid then
     return 0
   end
@@ -2988,48 +3042,79 @@ local function refresh_station_power_record(rec)
   end
   apply_station_charge_rate_to_power_entity(rec)
   local available_energy = station_available_energy(rec)
-  local buffer_capacity_j = station_buffer_capacity_j(rec)
+  local buffer_capacity_j = station_transfer_owner_is_active(rec) and station_transfer_required_energy_j(rec) or 0
   rec.last_power_energy_j = available_energy
   rec.stop_power_ratio = buffer_capacity_j > 0 and math.max(0, math.min(1, available_energy / buffer_capacity_j)) or 0
-  rec.stop_fully_powered = available_energy >= station_action_energy_j(rec)
+  rec.stop_fully_powered = buffer_capacity_j > 0 and available_energy >= buffer_capacity_j
   refresh_station_circuit_state(rec)
 end
 
-local function consume_station_action_energy(rec, reason_key)
-  local power_entity = ensure_station_power_entity(rec)
-  if not power_entity or not power_entity.valid then
+function cancel_station_action_energy(rec, owner_unit_number)
+  if not rec then
+    return
+  end
+  if owner_unit_number and rawget(rec, "power_transfer_owner_unit_number") ~= owner_unit_number then
+    return
+  end
+  destroy_station_power_entity(rec)
+  refresh_station_circuit_state(rec)
+end
+
+local function consume_station_action_energy(rec, reason_key, owner_unit_number)
+  if not rec or not is_valid(rec.entity) then
     return false
   end
 
   local action_energy_j = station_action_energy_j(rec)
   if action_energy_j <= 0 then
-    rec.power_unit_number = power_entity.unit_number
+    cancel_station_action_energy(rec, owner_unit_number)
     return true
   end
 
-  local available_energy = math.max(0, power_entity.energy or 0)
+  if station_transfer_owner_is_active(rec) then
+    local active_owner = rawget(rec, "power_transfer_owner_unit_number")
+    local active_reason = rawget(rec, "power_transfer_reason")
+    if active_owner ~= owner_unit_number or active_reason ~= reason_key then
+      refresh_station_power_record(rec)
+      return false
+    end
+  else
+    rec.power_transfer_owner_unit_number = owner_unit_number
+    rec.power_transfer_reason = reason_key
+    rec.power_transfer_required_j = action_energy_j
+  end
+
+  local power_entity = apply_station_charge_rate_to_power_entity(rec)
+  if not power_entity or not power_entity.valid then
+    refresh_station_power_record(rec)
+    return false
+  end
+
+  local available_energy = math.max(0, math.min(action_energy_j, power_entity.energy or 0))
+  rec.last_power_energy_j = available_energy
+  rec.stop_power_ratio = action_energy_j > 0 and math.max(0, math.min(1, available_energy / action_energy_j)) or 0
+  rec.stop_fully_powered = available_energy >= action_energy_j
   if available_energy < action_energy_j then
     refresh_station_power_record(rec)
     return false
   end
 
-  power_entity.energy = math.max(0, available_energy - action_energy_j)
-  rec.power_unit_number = power_entity.unit_number
   rec.last_power_spend_tick = game and game.tick or nil
   rec.last_power_spend_reason = reason_key
   rec.last_power_spend_before_j = available_energy
-  rec.last_power_spend_after_j = power_entity.energy
+  rec.last_power_spend_after_j = 0
   log(serpent.line({
     tag = "ff-station-action-spend",
     tick = game and game.tick or nil,
     station_unit_number = rec.unit_number,
     reason = reason_key,
     before_energy_j = available_energy,
-    after_energy_j = power_entity.energy,
+    after_energy_j = 0,
     surface = rec.entity and rec.entity.valid and rec.entity.surface and rec.entity.surface.name or nil,
     position = rec.entity and rec.entity.valid and rec.entity.position or nil,
   }))
-  refresh_station_power_record(rec)
+  destroy_station_power_entity(rec)
+  refresh_station_circuit_state(rec)
   return true
 end
 
@@ -3223,38 +3308,26 @@ local function update_station_power_states_in_bucket(bucket_index)
       local power_entity = apply_station_charge_rate_to_power_entity(rec)
       ensure_station_circuit_entity(rec)
       if power_entity and power_entity.valid then
-        local buffer_capacity_j = station_buffer_capacity_j(rec)
-        local action_energy_j = station_action_energy_j(rec)
+        local buffer_capacity_j = station_transfer_required_energy_j(rec)
         local current_energy = math.max(0, math.min(buffer_capacity_j, power_entity.energy or 0))
-        local previous_energy = rec.last_power_energy_j
-        local drop_j = previous_energy and (previous_energy - current_energy) or 0
-        local recent_scripted_spend = rec.last_power_spend_tick
-          and game.tick - rec.last_power_spend_tick <= 120
-          and (
-            action_energy_j <= 0
-            or (drop_j >= (action_energy_j - 1000000) and drop_j <= (action_energy_j + 1000000))
-          )
         local ratio = buffer_capacity_j > 0 and math.max(0, math.min(1, current_energy / buffer_capacity_j)) or 0
-        if previous_energy and drop_j > 1000000 and not recent_scripted_spend then
-          warn_station_unexpected_power_drain(rec, previous_energy, current_energy)
-        end
         rec.stop_power_ratio = ratio
         rec.power_unit_number = power_entity.unit_number
-        rec.stop_fully_powered = current_energy >= action_energy_j
+        rec.stop_fully_powered = buffer_capacity_j > 0 and current_energy >= buffer_capacity_j
         rec.last_power_energy_j = current_energy
         refresh_station_circuit_state(rec)
       else
         rec.stop_power_ratio = 0
         rec.stop_fully_powered = false
         rec.power_unit_number = nil
-        rec.last_power_energy_j = nil
+        rec.last_power_energy_j = 0
         refresh_station_circuit_state(rec)
       end
     elseif rec then
       rec.stop_power_ratio = 0
       rec.stop_fully_powered = false
       rec.power_unit_number = nil
-      rec.last_power_energy_j = nil
+      rec.last_power_energy_j = 0
       refresh_station_circuit_state(rec)
     end
   end
@@ -3275,9 +3348,7 @@ local function find_station_candidates(station_signal_key, station_type)
 
   local powered = {}
   for _, rec in ipairs(collect_matching_station_records(station_signal_key, station_type)) do
-    if station_has_full_power(rec) then
-      powered[#powered + 1] = rec
-    end
+    powered[#powered + 1] = rec
   end
   cache.powered_station_candidates[cache_key] = powered
   return powered
@@ -3290,9 +3361,7 @@ _ENV.find_station_candidates = find_station_candidates
 local function collect_powered_station_records_from_units(unit_set)
   local list = {}
   for _, rec in ipairs(collect_station_records_from_units(unit_set)) do
-    if station_has_full_power(rec) then
-      list[#list + 1] = rec
-    end
+    list[#list + 1] = rec
   end
   return list
 end
@@ -3717,8 +3786,10 @@ local function station_wait_reason_summary(rec)
   if not rec or not is_valid(rec.entity) then
     return "missing stop"
   end
+  refresh_station_power_record(rec)
   local available_energy = station_available_energy(rec)
-  return station_chart_tag_text(rec) .. " has " .. format_energy_mj_string(available_energy) .. " / " .. format_energy_mj_string(station_action_energy_j(rec)) .. " MJ"
+  local required_energy = station_transfer_owner_is_active(rec) and station_transfer_required_energy_j(rec) or station_action_energy_j(rec)
+  return station_chart_tag_text(rec) .. " has charged " .. format_energy_mj_string(available_energy) .. " / " .. format_energy_mj_string(required_energy) .. " MJ for the active transfer"
 end
 
 local function station_has_any_fuel_items(inv)
@@ -3818,12 +3889,12 @@ local function waiting_status_message_for_freighter(freighter)
   end
 
   if freighter.state == "waiting_load" then
-    local source = global.ff.stations[freighter.target_station]
+    local source = global.ff.stations[freighter.source_station or freighter.target_station]
     if not source or not is_valid(source.entity) then
       return "Waiting to load, but the pickup stop is missing."
     end
-    if not station_has_full_power(source) then
-      return "Waiting to load because the pickup stop is not fully powered: " .. station_wait_reason_summary(source) .. "."
+    if rawget(source, "power_transfer_owner_unit_number") == freighter.unit_number and not station_has_full_power(source) then
+      return "Waiting to load while the pickup transfer charges: " .. station_wait_reason_summary(source) .. "."
     end
     return "Loading cargo at " .. station_chart_tag_text(source) .. "."
   end
@@ -3833,8 +3904,8 @@ local function waiting_status_message_for_freighter(freighter)
     if not target or not is_valid(target.entity) then
       return "Waiting to unload, but the dropoff stop is missing."
     end
-    if not station_has_full_power(target) then
-      return "Waiting to unload because the dropoff stop is not fully powered: " .. station_wait_reason_summary(target) .. "."
+    if rawget(target, "power_transfer_owner_unit_number") == freighter.unit_number and not station_has_full_power(target) then
+      return "Waiting to unload while the dropoff transfer charges: " .. station_wait_reason_summary(target) .. "."
     end
     local dst_inv = get_inventory(target.entity)
     local cargo_label = freighter.cargo_item and tostring(freighter.cargo_item) or "mixed cargo"
@@ -3864,8 +3935,8 @@ local function waiting_status_message_for_freighter(freighter)
     if not target or not is_valid(target.entity) then
       return "Waiting to resupply, but the chosen stop is missing."
     end
-    if not station_has_full_power(target) then
-      return "Waiting to resupply because the stop is not fully powered: " .. station_wait_reason_summary(target) .. "."
+    if rawget(target, "power_transfer_owner_unit_number") == freighter.unit_number and not station_has_full_power(target) then
+      return "Waiting to resupply while the stop transfer charges: " .. station_wait_reason_summary(target) .. "."
     end
     local station_inv = get_inventory(target.entity)
     if freighter.resupply_needs_fuel and not station_has_any_fuel_items(station_inv) then
@@ -3919,14 +3990,17 @@ local function waiting_status_message_for_freighter(freighter)
     if not target or not is_valid(target.entity) then
       return "Waiting to dump cargo, but no valid Trash stop is assigned."
     end
-    if freighter.state == "waiting_force_dump" and not station_has_full_power(target) then
-      return "Waiting to dump cargo because the Trash stop is not fully powered: " .. station_wait_reason_summary(target) .. "."
+    if freighter.state == "waiting_force_dump"
+      and rawget(target, "power_transfer_owner_unit_number") == freighter.unit_number
+      and not station_has_full_power(target)
+    then
+      return "Waiting to dump cargo while the Trash-stop transfer charges: " .. station_wait_reason_summary(target) .. "."
     end
     return "Force route change is active; the freighter is trying to dump cargo at " .. station_chart_tag_text(target) .. "."
   end
 
   if freighter.force_waiting_for_trash then
-    return "Waiting on a Trash stop: force-route-change is enabled, but no powered Trash stop is available."
+    return "Waiting on a Trash stop: force-route-change is enabled, but no Trash stop is available."
   end
 
   local missing_from, missing_to = freighter_active_leg_missing_route_flags(freighter)
@@ -3972,9 +4046,9 @@ local function waiting_status_message_for_freighter(freighter)
           dispatch_route and effective_station_network_id(dispatch_route.source) or freighter_service_network_id(freighter)
         )
         if resupply_stop then
-          message = message .. " A powered fuel stop exists at " .. station_chart_tag_text(resupply_stop) .. "."
+          message = message .. " A fuel stop exists at " .. station_chart_tag_text(resupply_stop) .. "."
         else
-          message = message .. " No powered fuel stop is available, so add more fuel by hand or power a fuel stop."
+          message = message .. " No fuel stop is available, so add more fuel by hand or add a matching fuel stop."
         end
       end
       return message
@@ -4010,49 +4084,32 @@ local function waiting_status_message_for_freighter(freighter)
     return "Waiting on a destination stop: no demand station matches the selected destination signal " .. tostring(freighter.to_signal_key) .. "."
   end
 
-  local powered_sources = {}
-  local unpowered_source = nil
+  local matching_sources = {}
   local any_non_demand_source = false
   for _, rec in ipairs(source_records) do
     if effective_station_type(rec) ~= "demand" and is_valid(rec.entity) and rec.entity.surface == freighter.entity.surface then
       any_non_demand_source = true
-      if station_has_full_power(rec) then
-        powered_sources[#powered_sources + 1] = rec
-      elseif not unpowered_source then
-        unpowered_source = rec
-      end
+      matching_sources[#matching_sources + 1] = rec
     end
   end
   if not any_non_demand_source then
     return "Waiting on a supply stop: every station matching the source signal is set to Demand, so none can act as pickup."
   end
-  if #powered_sources == 0 then
-    if unpowered_source then
-      return "Waiting on source station power: " .. station_wait_reason_summary(unpowered_source) .. "."
-    end
-    return "Waiting on source station power: no powered pickup stop matches the source signal."
-  end
 
-  local powered_targets = {}
-  local unpowered_target = nil
+  local matching_targets = {}
   for _, rec in ipairs(target_records) do
-    if is_valid(rec.entity) and rec.entity.surface == freighter.entity.surface and station_has_full_power(rec) then
-      powered_targets[#powered_targets + 1] = rec
-    elseif is_valid(rec.entity) and rec.entity.surface == freighter.entity.surface and not unpowered_target then
-      unpowered_target = rec
+    if is_valid(rec.entity) and rec.entity.surface == freighter.entity.surface then
+      matching_targets[#matching_targets + 1] = rec
     end
   end
-  if #powered_targets == 0 then
-    if unpowered_target then
-      return "Waiting on destination station power: " .. station_wait_reason_summary(unpowered_target) .. "."
-    end
-    return "Waiting on destination station power: no powered demand stop matches the destination signal."
+  if #matching_targets == 0 then
+    return "Waiting on a destination stop: no matching demand stop exists on this surface."
   end
 
   local shared_network_exists = false
-  for _, source in ipairs(powered_sources) do
+  for _, source in ipairs(matching_sources) do
     local source_network_id = effective_station_network_id(source)
-    for _, target in ipairs(powered_targets) do
+    for _, target in ipairs(matching_targets) do
       if target.unit_number ~= source.unit_number and effective_station_network_id(target) == source_network_id then
         shared_network_exists = true
         break
@@ -4063,7 +4120,7 @@ local function waiting_status_message_for_freighter(freighter)
     end
   end
   if not shared_network_exists then
-    return "Waiting on network match: the powered source and destination stops use different network IDs, so they cannot link."
+    return "Waiting on network match: the source and destination stops use different network IDs, so they cannot link."
   end
 
   local any_transferable_item = false
@@ -4155,9 +4212,9 @@ local function waiting_status_message_for_freighter(freighter)
         best_fuel_shortfall and effective_station_network_id(best_fuel_shortfall.source) or freighter_service_network_id(freighter)
       )
       if resupply_stop then
-        message = message .. " A powered fuel stop exists at " .. station_chart_tag_text(resupply_stop) .. "."
+        message = message .. " A fuel stop exists at " .. station_chart_tag_text(resupply_stop) .. "."
       else
-        message = message .. " No powered fuel stop is available, so add more fuel by hand or power a fuel stop."
+        message = message .. " No fuel stop is available, so add more fuel by hand or add a matching fuel stop."
       end
     end
     return message
@@ -5273,10 +5330,6 @@ local function depart(freighter, route, tick)
     return false
   end
 
-  if station_available_energy(route.source) < station_action_energy_j(route.source) then
-    refresh_station_power_record(route.source)
-    return false
-  end
   local previous_fuel_credit_j = freighter.fuel_credit_j or 0
   local previous_fuel_debt_j = freighter.fuel_debt_j or 0
   if not consume_trip_energy(freighter, fuel_inv, trip_energy) then
@@ -5289,33 +5342,7 @@ local function depart(freighter, route, tick)
     return false
   end
 
-  if not consume_station_action_energy(route.source, "instant-load") then
-    freighter.fuel_credit_j = previous_fuel_credit_j
-    freighter.fuel_debt_j = previous_fuel_debt_j
-    return false
-  end
-
-  source_inv.remove{name = route.item_name, count = route.amount}
-  cargo_inv.insert{name = route.item_name, count = route.amount}
-
-  local cache = global.ff.runtime_cycle_cache
-  if cache and cache.tick == game.tick then
-    local source_counts = cache.station_inventory_counts[route.source.unit_number]
-    if source_counts and source_counts[route.item_name] then
-      local remaining = source_counts[route.item_name] - route.amount
-      source_counts[route.item_name] = remaining > 0 and remaining or nil
-    end
-
-    local source_item_counts = cache.station_item_counts[route.source.unit_number]
-    if source_item_counts and source_item_counts[route.item_name] then
-      local remaining = source_item_counts[route.item_name] - route.amount
-      source_item_counts[route.item_name] = remaining > 0 and remaining or nil
-    end
-
-    cache.route_plans = {}
-  end
-
-  freighter.state = "in_transit"
+  freighter.state = "waiting_load"
   freighter.trip_operation = "transfer"
   freighter.trip_manifest = copy_item_count_manifest(route.manifest)
   freighter.idle_waiting_for_load = nil
@@ -5324,10 +5351,11 @@ local function depart(freighter, route, tick)
   freighter.target_station = route.target.unit_number
   freighter.route_network_id = route.route_network_id
   freighter.route_key = route.route_key
-  sync_freighter_cargo_summary_from_inventory(freighter)
   add_inbound_reservation_manifest(route.target.unit_number, freighter.inbound_manifest)
-
-  start_travel(freighter, src_pos, dst_pos, tick, "in_transit")
+  freighter.travel_start_tick = nil
+  freighter.travel_end_tick = nil
+  freighter.start_position = nil
+  freighter.end_position = nil
   return true
 end
 
@@ -5338,6 +5366,14 @@ clear_route_claim = function(freighter)
 end
 
 finish_unload = function(freighter)
+  local source = freighter.source_station and global.ff.stations[freighter.source_station] or nil
+  if source and rawget(source, "power_transfer_owner_unit_number") == freighter.unit_number then
+    cancel_station_action_energy(source, freighter.unit_number)
+  end
+  local target = freighter.target_station and global.ff.stations[freighter.target_station] or nil
+  if target and rawget(target, "power_transfer_owner_unit_number") == freighter.unit_number then
+    cancel_station_action_energy(target, freighter.unit_number)
+  end
   release_freighter_inbound_reservation(freighter)
   clear_route_claim(freighter)
   clear_freighter_destination(freighter.entity)
@@ -5505,18 +5541,16 @@ local function process_freighter(freighter, tick)
   end
 
   if freighter.state == "waiting_load" then
-    local source = global.ff.stations[freighter.target_station]
+    local source = global.ff.stations[freighter.source_station or freighter.target_station]
     if not source or not is_valid(source.entity) then
       finish_unload(freighter)
-      return
-    end
-    if not station_has_full_power(source) then
       return
     end
 
     local source_inv = get_inventory(source.entity)
     local cargo_inv = get_freighter_inventory(freighter.entity)
     if not source_inv or not cargo_inv then
+      cancel_station_action_energy(source, freighter.unit_number)
       finish_unload(freighter)
       return
     end
@@ -5534,9 +5568,11 @@ local function process_freighter(freighter, tick)
       live_manifest, live_total_count = build_live_load_manifest_for_freighter(freighter, source, cargo_inv, get_runtime_cycle_cache())
       freighter.trip_manifest = live_manifest
       if live_total_count <= 0 then
+        cancel_station_action_energy(source, freighter.unit_number)
         return
       end
       if item_count_manifest_fill_units(live_manifest) < minimum_departure_fill_units then
+        cancel_station_action_energy(source, freighter.unit_number)
         return
       end
       freighter.idle_waiting_for_load = nil
@@ -5557,6 +5593,7 @@ local function process_freighter(freighter, tick)
       -- threshold, abandon the visit entirely so the freighter can choose a better stop
       -- instead of repeatedly charging the same understocked station.
       if current_fill_units <= 0 and (live_total_count <= 0 or live_fill_units < minimum_departure_fill_units) then
+        cancel_station_action_energy(source, freighter.unit_number)
         finish_unload(freighter)
         return
       end
@@ -5566,6 +5603,7 @@ local function process_freighter(freighter, tick)
       -- departure threshold. This prevents one-item retries from draining the stop every
       -- second while still preserving the configured "wait until full enough" behavior.
       if live_total_count <= 0 or live_fill_units < remaining_fill_units_needed then
+        cancel_station_action_energy(source, freighter.unit_number)
         return
       end
     end
@@ -5579,6 +5617,7 @@ local function process_freighter(freighter, tick)
     if inventory_fill_units(cargo_inv) <= 0
       and item_count_manifest_fill_units(freighter.trip_manifest) < minimum_departure_fill_units
     then
+      cancel_station_action_energy(source, freighter.unit_number)
       finish_unload(freighter)
       return
     end
@@ -5591,8 +5630,11 @@ local function process_freighter(freighter, tick)
       end
     end
 
-    if can_transfer and not consume_station_action_energy(source, "waiting-load") then
+    if can_transfer and not consume_station_action_energy(source, "waiting-load", freighter.unit_number) then
       return
+    end
+    if not can_transfer then
+      cancel_station_action_energy(source, freighter.unit_number)
     end
 
     local transferred_any = false
@@ -5630,6 +5672,18 @@ local function process_freighter(freighter, tick)
       end
     end
 
+    if freighter.trip_operation == "transfer" then
+      local target = global.ff.stations[freighter.target_station]
+      if not target or not is_valid(target.entity) then
+        finish_unload(freighter)
+        return
+      end
+      freighter.state = "in_transit"
+      start_travel(freighter, station_dock_position(source.entity), station_dock_position(target.entity), tick, "in_transit")
+      sync_freighter_cargo_summary_from_inventory(freighter)
+      return
+    end
+
     freighter.completed_schedule_leg = true
     finish_unload(freighter)
     return
@@ -5641,13 +5695,11 @@ local function process_freighter(freighter, tick)
       finish_unload(freighter)
       return
     end
-    if not station_has_full_power(target) then
-      return
-    end
 
     local dst_inv = get_inventory(target.entity)
     local cargo_inv = get_freighter_inventory(freighter.entity)
     if not dst_inv or not cargo_inv then
+      cancel_station_action_energy(target, freighter.unit_number)
       finish_unload(freighter)
       return
     end
@@ -5683,8 +5735,11 @@ local function process_freighter(freighter, tick)
       end
     end
 
-    if can_transfer and not consume_station_action_energy(target, "waiting-unload") then
+    if can_transfer and not consume_station_action_energy(target, "waiting-unload", freighter.unit_number) then
       return
+    end
+    if not can_transfer then
+      cancel_station_action_energy(target, freighter.unit_number)
     end
 
     local moved_any = false
@@ -5801,9 +5856,6 @@ local function process_freighter(freighter, tick)
       finish_unload(freighter)
       return
     end
-    if not station_has_full_power(stop) then
-      return
-    end
     local station_inv = get_inventory(stop.entity)
     local ammo_inv = get_freighter_ammo_inventory(freighter.entity)
     local fuel_inv = get_freighter_fuel_inventory(freighter.entity)
@@ -5826,12 +5878,13 @@ local function process_freighter(freighter, tick)
       end
     end
     if not can_resupply_transfer_items(freighter, stop, station_inv, ammo_inv, fuel_inv) then
+      cancel_station_action_energy(stop, freighter.unit_number)
       if ammo_inv and fuel_inv and not freighter_needs_resupply(freighter, ammo_inv, fuel_inv) then
         finish_unload(freighter)
       end
       return
     end
-    if not consume_station_action_energy(stop, "waiting-resupply") then
+    if not consume_station_action_energy(stop, "waiting-resupply", freighter.unit_number) then
       return
     end
     if not do_resupply(freighter) then
@@ -5871,12 +5924,10 @@ local function process_freighter(freighter, tick)
 
   if freighter.state == "waiting_force_dump" then
     local trash = global.ff.stations[freighter.target_station]
-    if trash and not station_has_full_power(trash) then
-      return
-    end
     local cargo_inv = get_freighter_inventory(freighter.entity)
     local trash_inv = trash and is_valid(trash.entity) and get_inventory(trash.entity) or nil
     if not trash_inv or not cargo_inv then
+      cancel_station_action_energy(trash, freighter.unit_number)
       finish_unload(freighter)
       return
     end
@@ -5893,10 +5944,11 @@ local function process_freighter(freighter, tick)
       end
     end
     if not can_transfer then
+      cancel_station_action_energy(trash, freighter.unit_number)
       return
     end
 
-    if not consume_station_action_energy(trash, "waiting-force-dump") then
+    if not consume_station_action_energy(trash, "waiting-force-dump", freighter.unit_number) then
       return
     end
     local all_moved = true
