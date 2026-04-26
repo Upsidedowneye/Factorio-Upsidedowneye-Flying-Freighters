@@ -13,6 +13,7 @@ local passive_provider_station_tint = {r = 1, g = 0.32, b = 0.32, a = 1}
 local freighter_tint = {r = 0.76, g = 0.46, b = 1, a = 1}
 local station_visual_growth_tiles = 1.25
 local station_visual_y_offset = 0.5
+local station_power_runtime_draw_cap_w = 100 * 1000000000
 local space_age_enabled = mods_root["space-age"] ~= nil
 local freighter_wing_flap_sound = {
   filename = "__upsidedowneye-flying-freighters__/sound/flying-freighter-wing-flap.ogg",
@@ -101,6 +102,26 @@ local function tinted_spidertron_icon(scale)
     tint = freighter_tint,
     scale = scale,
   }
+end
+
+-- The hidden station charger is an ElectricEnergyInterface, so the prototype
+-- still needs a generous input-flow limit before runtime logic can shape the
+-- actual draw rate. The script now throttles charging by exposing only a small
+-- rolling slice of empty EEI buffer at a time, so this helper stays around to
+-- express that intentionally high prototype-side ceiling in Factorio's string
+-- format.
+local function format_watt_limit_string(watts)
+  local whole_watts = math.max(0, math.floor(watts or 0))
+  if whole_watts % 1000000000 == 0 then
+    return tostring(whole_watts / 1000000000) .. "GW"
+  end
+  if whole_watts % 1000000 == 0 then
+    return tostring(whole_watts / 1000000) .. "MW"
+  end
+  if whole_watts % 1000 == 0 then
+    return tostring(whole_watts / 1000) .. "kW"
+  end
+  return tostring(whole_watts) .. "W"
 end
 
 local function cargo_pad_layer(name, width, height, shift, opts)
@@ -258,7 +279,7 @@ station_power.energy_source = {
   type = "electric",
   buffer_capacity = tostring(math.floor(station_power_defaults.buffer_j / 1000000)) .. "MJ",
   usage_priority = "secondary-input",
-  input_flow_limit = "100GW",
+  input_flow_limit = format_watt_limit_string(station_power_runtime_draw_cap_w),
   output_flow_limit = "0W",
 }
 station_power.energy_production = "0W"

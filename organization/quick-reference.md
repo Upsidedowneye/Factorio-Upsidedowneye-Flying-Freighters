@@ -25,3 +25,4 @@ Always try to do things with data-stage code and only use runtime code if data-s
 Always write detailed code comments.
 Don't be scared to redo large sections of code if it means optimizing the code.
 Always profile optimizations before and after with smoke tests to verify the optimization actually resulted in a performance increase. Depending on what was optimized you may have to copy my most recent save or ask me to test for you.
+Let me handle git stuff.
