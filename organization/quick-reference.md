@@ -14,7 +14,7 @@ The mod we are working on is called "upsidedowneye-flying-freighters".
 Compatability should be present with all other mods on the mod portal, but most importantly the mod should work with Space-Age and RampantArsenalFork.
 If you find yourself running the same, long command a lot, consider making a shell script for it.
 If you notice a desync between what the code suggests is going on and the GDD claims is happening, point it out.
-The Factorio API docs can be found locally at /run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/2.1/Linux/doc-html/
+The Factorio API docs can be found locally at /run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/2.1/Linux/doc-html/ . Avoid the online API docs.
 The old API docs for 1.1 (if needed) can be found locally at /run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/1.1/Linux/doc-html/
 If a bug persists multiple times after attempted patches, begin adding logs to see what is going wrong.
 My factorio-current.log can always be found at /run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/2.1/Variables/factorio-current.log

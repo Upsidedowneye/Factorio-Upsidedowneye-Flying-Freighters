@@ -1168,6 +1168,93 @@ function selected_new_freighter_fuel_item_name()
   return fuel_item_name
 end
 
+function freighter_startup_fuel_request_member_index(entity)
+  if not is_valid(entity) then
+    return nil
+  end
+  if entity.type == "spider-vehicle" then
+    return defines.logistic_member_index.spidertron_requester
+  end
+  if entity.type == "car" then
+    return defines.logistic_member_index.car_requester
+  end
+  return nil
+end
+
+function freighter_startup_fuel_request_point(entity)
+  if not is_valid(entity) or not entity.get_logistic_point then
+    return nil
+  end
+  local member_index = freighter_startup_fuel_request_member_index(entity)
+  if not member_index then
+    return nil
+  end
+  local logistic_point = entity.get_logistic_point(member_index)
+  if logistic_point and logistic_point.valid then
+    return logistic_point
+  end
+  return nil
+end
+
+function find_freighter_startup_fuel_request_section(logistic_point)
+  if not (logistic_point and logistic_point.valid) then
+    return nil
+  end
+  for _, section in pairs(logistic_point.sections or {}) do
+    if section and section.valid and section.is_manual and section.group == "ff-startup-fuel" then
+      return section
+    end
+  end
+  return nil
+end
+
+function freighter_startup_fuel_request_proxy(entity)
+  if not is_valid(entity) then
+    return nil
+  end
+  local proxy = entity.item_request_proxy
+  if proxy and proxy.valid and proxy.name == "item-request-proxy" then
+    return proxy
+  end
+  return nil
+end
+
+function clear_freighter_startup_fuel_request(entity)
+  local cleared = false
+
+  local proxy = freighter_startup_fuel_request_proxy(entity)
+  if proxy then
+    proxy.destroy()
+    cleared = true
+  end
+
+  local logistic_point = freighter_startup_fuel_request_point(entity)
+  if logistic_point then
+    local section = find_freighter_startup_fuel_request_section(logistic_point)
+    if section then
+      section.clear_slot(1)
+      if logistic_point.remove_section(section.index) then
+        cleared = true
+      end
+    end
+  end
+
+  return cleared
+end
+
+function freighter_has_any_fuel(entity)
+  local fuel_inventory = get_freighter_fuel_inventory(entity)
+  if not fuel_inventory then
+    return false
+  end
+  for _, count in pairs(get_inventory_name_counts(fuel_inventory)) do
+    if count > 0 then
+      return true
+    end
+  end
+  return false
+end
+
 function try_seed_new_freighter_with_setting_fuel(entity)
   if not is_valid(entity) or entity.name ~= FREIGHTER_NAME then
     return
@@ -1175,36 +1262,75 @@ function try_seed_new_freighter_with_setting_fuel(entity)
 
   local fuel_item_name = selected_new_freighter_fuel_item_name()
   if not fuel_item_name then
+    clear_freighter_startup_fuel_request(entity)
     return
   end
 
   local fuel_inventory = get_freighter_fuel_inventory(entity)
   if not fuel_inventory then
+    clear_freighter_startup_fuel_request(entity)
     return
   end
 
-  -- Preserve any existing burner contents. This setting is only meant to give an
-  -- empty newly built or revived freighter a bootstrap fuel load, not overwrite a
-  -- loadout that another script, migration, or future construction path supplied.
-  for _, count in pairs(get_inventory_name_counts(fuel_inventory)) do
-    if count > 0 then
-      return
-    end
+  -- Preserve any existing burner contents. This setting is only meant to bootstrap
+  -- an empty newly built or revived freighter, not overwrite a loadout that another
+  -- script, migration, or future construction path supplied.
+  if freighter_has_any_fuel(entity) then
+    clear_freighter_startup_fuel_request(entity)
+    return
   end
 
   local insertable_count = fuel_inventory.get_insertable_count(fuel_item_name)
   if insertable_count <= 0 then
+    clear_freighter_startup_fuel_request(entity)
     return
   end
 
-  -- Seed one stack's worth of the selected fuel so a freshly placed freighter can
-  -- usually make its first trip or reach a fuel stop without immediate handholding.
-  local amount_to_insert = math.min(insertable_count, item_stack_size(fuel_item_name))
-  if amount_to_insert <= 0 then
+  local amount_to_request = math.min(insertable_count, item_stack_size(fuel_item_name))
+  if amount_to_request <= 0 then
+    clear_freighter_startup_fuel_request(entity)
     return
   end
 
-  fuel_inventory.insert{name = fuel_item_name, count = amount_to_insert}
+  local surface = entity.surface
+  if not (surface and surface.valid) then
+    return
+  end
+
+  clear_freighter_startup_fuel_request(entity)
+
+  local proxy = surface.create_entity({
+    name = "item-request-proxy",
+    position = entity.position,
+    force = entity.force,
+    target = entity,
+    modules = {
+      {
+        id = {name = fuel_item_name, quality = "normal"},
+        items = {
+          in_inventory = {
+            {
+              inventory = defines.inventory.fuel,
+              stack = 0,
+              count = amount_to_request,
+            },
+          },
+        },
+      },
+    },
+  })
+  if not (proxy and proxy.valid) then
+    return
+  end
+end
+
+function clear_freighter_startup_fuel_request_if_satisfied(freighter)
+  if not freighter or not is_valid(freighter.entity) then
+    return
+  end
+  if not selected_new_freighter_fuel_item_name() or freighter_has_any_fuel(freighter.entity) then
+    clear_freighter_startup_fuel_request(freighter.entity)
+  end
 end
 
 function get_freighter_burner(entity)
@@ -5517,6 +5643,8 @@ local function process_freighter(freighter, tick)
   if not is_valid(freighter.entity) then
     return
   end
+
+  clear_freighter_startup_fuel_request_if_satisfied(freighter)
 
   local active_entry = active_freighter_schedule_entry(freighter)
 

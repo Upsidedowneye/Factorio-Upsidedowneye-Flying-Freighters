@@ -478,7 +478,7 @@ Implemented copy behavior:
 
 When a freighter dies, the mod stores its last route settings and backer name for its force. A newly built freighter can inherit that data if placed within about 10 minutes.
 
-Newly built or revived freighters now also preload one stack of the selected starter fuel into an otherwise empty burner inventory. The runtime-global `Starter fuel for newly built freighters` map setting defaults to `coal`, and choosing `none` disables the preload.
+Newly built or revived freighters now create a temporary `item-request-proxy` that targets the burner fuel slot with one stack of the selected starter fuel when their burner inventory is empty. Once fuel arrives, the temporary proxy is removed so the bots do not keep topping the freighter back up forever, and the request now shows up as a visible fuel-slot ghost on the freighter. The startup-fuel proxy now also uses the correct explicit burner inventory-position payload, so placing a new freighter no longer crashes with an invalid empty inventory-plan error. The runtime-global `Starter fuel for newly built freighters` map setting defaults to `coal`, and choosing `none` disables the startup request.
 
 ## 9. Safety Rules and Validation
 
