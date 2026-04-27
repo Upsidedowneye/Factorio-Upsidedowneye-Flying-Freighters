@@ -124,6 +124,8 @@ local ensure_station_circuit_entity
 local station_has_external_circuit_wires
 local station_has_full_power
 local get_inventory_name_counts
+local play_menu_confirm_sound
+local play_entity_settings_paste_sound
 local rendering = rawget(_G, "rendering")
 
 -- Keep the monolithic runtime script split into focused helper modules so schedule
@@ -883,6 +885,36 @@ function copy_signal_id(signal)
     copied_signal.quality = signal_quality
   end
   return copied_signal
+end
+
+function tables_deep_equal(left, right)
+  if left == right then
+    return true
+  end
+
+  if type(left) ~= type(right) then
+    return false
+  end
+
+  if type(left) ~= "table" then
+    return false
+  end
+
+  -- Compare normalized settings payloads structurally so paste feedback only
+  -- fires when at least one stored setting actually changes on the target.
+  for key, left_value in pairs(left) do
+    if not tables_deep_equal(left_value, right[key]) then
+      return false
+    end
+  end
+
+  for key in pairs(right) do
+    if left[key] == nil then
+      return false
+    end
+  end
+
+  return true
 end
 
 function is_rampant_capsule_ammo_name(item_name)
@@ -3083,19 +3115,6 @@ apply_station_charge_rate_to_power_entity = function(rec)
   end
   stored_progress_j = set_station_transfer_progress_j(rec, stored_progress_j, required_energy_j)
   local assigned_buffer_size_j = station_charge_buffer_size_j(rec, stored_progress_j, required_energy_j)
-  log(serpent.line({
-    tag = "ff-station-buffer-size-debug",
-    tick = game and game.tick or nil,
-    station_unit_number = rec.unit_number,
-    station_name = is_valid(rec.entity) and rec.entity.backer_name or nil,
-    power_unit_number = power_entity.unit_number,
-    transfer_reason = rawget(rec, "power_transfer_reason"),
-    charge_rate_w = station_charge_rate_w(rec),
-    harvested_energy_j = harvested_energy_j,
-    required_energy_j = required_energy_j,
-    transfer_progress_j = stored_progress_j,
-    assigned_buffer_size_j = assigned_buffer_size_j,
-  }))
   power_entity.power_production = 0
   power_entity.power_usage = 0
   if power_entity.energy ~= 0 then
@@ -4514,6 +4533,51 @@ freighter_needs_resupply = function(freighter, ammo_inv, fuel_inv)
     or (has_available_ammo_stop(surface_index, network_id) and get_total_capsule_ammo(ammo_inv) < LOW_AMMO_COUNT)
 end
 
+function freighter_still_needs_fuel_interrupt(freighter, fuel_inv)
+  if not freighter or not fuel_inv then
+    return false
+  end
+
+  -- Fuel interrupts can be triggered either by the generic low-fuel threshold or
+  -- by a route-specific preflight shortfall. Recheck both conditions so manual or
+  -- bot-driven burner refills can cancel an obsolete detour instead of forcing the
+  -- freighter to sit at the chosen fuel stop waiting for an unnecessary top-off.
+  if available_freighter_fuel_energy(freighter, fuel_inv) < LOW_FUEL_ENERGY_J then
+    return true
+  end
+
+  return next_dispatch_trip_energy_shortfall(freighter, fuel_inv) ~= nil
+end
+
+function freighter_still_needs_ammo_interrupt(freighter, ammo_inv)
+  if not freighter or not ammo_inv then
+    return false
+  end
+
+  local surface_index = freighter.entity and freighter.entity.surface and freighter.entity.surface.index or nil
+  local network_id = freighter_service_network_id(freighter)
+  return has_available_ammo_stop(surface_index, network_id) and get_total_capsule_ammo(ammo_inv) < LOW_AMMO_COUNT
+end
+
+function refresh_resupply_interrupt_needs(freighter, ammo_inv, fuel_inv)
+  if not freighter then
+    return false
+  end
+
+  -- Resupply trips latch the needs that caused the interrupt. Recompute those same
+  -- needs from live inventories so mid-flight manual help or logistics-bot fuel can
+  -- clear just the now-satisfied detour reason without inventing unrelated new ones.
+  if freighter.resupply_needs_fuel and not freighter_still_needs_fuel_interrupt(freighter, fuel_inv) then
+    freighter.resupply_needs_fuel = nil
+  end
+
+  if freighter.resupply_needs_ammo and not freighter_still_needs_ammo_interrupt(freighter, ammo_inv) then
+    freighter.resupply_needs_ammo = nil
+  end
+
+  return (freighter.resupply_needs_fuel and true or false) or (freighter.resupply_needs_ammo and true or false)
+end
+
 local function choose_nearest_fuel_stop(from_position, surface_index, network_id)
   local fuel_stops = find_fuel_stops()
   local best
@@ -5413,6 +5477,31 @@ local function should_advance_idle_freighter_to_next_unload_leg(rec)
   return freighter_schedule_entry_operation(next_entry) == "unload"
 end
 
+function should_handoff_partial_load_to_next_unload_leg(rec)
+  if not rec or not rec.schedule or #rec.schedule <= 1 then
+    return false
+  end
+
+  local active_entry = active_freighter_schedule_entry(rec)
+  if freighter_schedule_entry_operation(active_entry) ~= "load" then
+    return false
+  end
+
+  -- Supply-buffer pre-positioning can intentionally send an empty freighter to wait at
+  -- a source stop before enough stock exists for the configured departure threshold.
+  -- Once that waiting freighter has already boarded some cargo, letting it stay parked
+  -- forever after the source dries up strands real deliveries at the pickup stop. Hand
+  -- off only when cargo is already onboard and the immediate next leg is an unload so
+  -- multi-load schedules still keep their intended chaining behavior.
+  if item_count_manifest_is_empty(effective_freighter_cargo_manifest(rec)) then
+    return false
+  end
+
+  local next_index = (clamp_freighter_schedule_index(rec.schedule_current_index, rec.schedule) % #rec.schedule) + 1
+  local next_entry = freighter_schedule_entry_at(rec.schedule, next_index)
+  return freighter_schedule_entry_operation(next_entry) == "unload"
+end
+
 local function apply_freighter_record_settings(target_rec, source_rec)
   if not target_rec or not source_rec then
     return false
@@ -5435,8 +5524,11 @@ local function handle_entity_settings_pasted(event)
     and ((is_freighter_station_name(destination.name)) or is_station_ghost_target(destination))
   then
     local tags = station_settings_tags_from_entity(source)
-    if apply_station_settings_to_entity(destination, tags) and player then
-      player.print({"", "Pasted flying freighter stop settings to ", station_settings_paste_target_text(destination)})
+    local previous_tags = station_settings_tags_from_entity(destination)
+    local applied = apply_station_settings_to_entity(destination, tags)
+    local updated_tags = applied and station_settings_tags_from_entity(destination) or previous_tags
+    if applied and player and not tables_deep_equal(previous_tags, updated_tags) then
+      play_entity_settings_paste_sound(player)
     end
     return
   end
@@ -5445,20 +5537,11 @@ local function handle_entity_settings_pasted(event)
     and (destination.name == FREIGHTER_NAME or is_freighter_ghost_target(destination))
   then
     local tags = freighter_settings_tags_from_entity(source)
+    local previous_tags = freighter_settings_tags_from_entity(destination)
     local result = apply_freighter_settings_to_entity(destination, tags)
-    if result and player then
-      local pasted_rec = freighter_edit_settings_from_tags(tags)
-      local next_from, next_to = effective_freighter_route_settings(pasted_rec)
-      player.print({
-        "",
-        "Pasted flying freighter route settings to ",
-        freighter_settings_paste_target_text(destination),
-        " (",
-        route_signal_display_text(next_from),
-        " -> ",
-        route_signal_display_text(next_to),
-        ")",
-      })
+    local updated_tags = result and freighter_settings_tags_from_entity(destination) or previous_tags
+    if result and player and not tables_deep_equal(previous_tags, updated_tags) then
+      play_entity_settings_paste_sound(player)
     end
   end
 end
@@ -5840,6 +5923,10 @@ local function process_freighter(freighter, tick)
       -- second while still preserving the configured "wait until full enough" behavior.
       if live_total_count <= 0 or live_fill_units < remaining_fill_units_needed then
         cancel_station_action_energy(source, freighter.unit_number)
+        if should_handoff_partial_load_to_next_unload_leg(freighter) then
+          freighter.completed_schedule_leg = true
+          finish_unload(freighter)
+        end
         return
       end
     end
@@ -6036,6 +6123,14 @@ local function process_freighter(freighter, tick)
   end
 
   if freighter.state == "to_resupply" then
+    local ammo_inv = get_freighter_ammo_inventory(freighter.entity)
+    local fuel_inv = get_freighter_fuel_inventory(freighter.entity)
+    if ammo_inv and fuel_inv and not refresh_resupply_interrupt_needs(freighter, ammo_inv, fuel_inv) then
+      clear_freighter_destination(freighter.entity)
+      finish_unload(freighter)
+      return
+    end
+
     if not freighter.travel_start_tick or not freighter.travel_end_tick then
       finish_unload(freighter)
       return
@@ -6095,6 +6190,12 @@ local function process_freighter(freighter, tick)
     local station_inv = get_inventory(stop.entity)
     local ammo_inv = get_freighter_ammo_inventory(freighter.entity)
     local fuel_inv = get_freighter_fuel_inventory(freighter.entity)
+    if ammo_inv and fuel_inv and not refresh_resupply_interrupt_needs(freighter, ammo_inv, fuel_inv) then
+      cancel_station_action_energy(stop, freighter.unit_number)
+      finish_unload(freighter)
+      return
+    end
+
     if station_inv and fuel_inv and freighter.resupply_needs_fuel then
       local swap_plan = fuel_swap_plan(freighter, station_inv, fuel_inv)
       if swap_plan
@@ -7590,6 +7691,70 @@ function modify_freighter_edit_schedule(player_index, operation)
   return true
 end
 
+function clone_inverted_current_leg_into_next_freighter_schedule_leg(player_index)
+  local edit = ensure_freighter_edit_schedule_state(global.ff.player_edit[player_index])
+  if not edit or (edit.kind ~= "freighter" and edit.kind ~= "freighter-map" and edit.kind ~= "freighter-ghost") then
+    return false
+  end
+
+  apply_freighter_schedule_editor_controls_to_edit(player_index)
+
+  local schedule_count = #edit.schedule
+  if schedule_count <= 0 then
+    return false
+  end
+
+  local current_index = clamp_freighter_schedule_index(edit.selected_schedule_index or 1, edit.schedule)
+  local current_entry = freighter_schedule_entry_at(edit.schedule, current_index)
+  if not current_entry then
+    return false
+  end
+
+  local cloned_entry = normalize_freighter_schedule_entry(current_entry)
+  if not cloned_entry then
+    return false
+  end
+
+  local current_stop_signal_key = freighter_schedule_entry_stop_signal_key(cloned_entry)
+  cloned_entry.operation = freighter_schedule_entry_operation(cloned_entry) == "unload" and "load" or "unload"
+  set_freighter_schedule_entry_stop_signal_key(cloned_entry, current_stop_signal_key)
+
+  local next_index = nil
+  if schedule_count == 1 then
+    table.insert(edit.schedule, current_index + 1, cloned_entry)
+    next_index = current_index + 1
+  else
+    next_index = (current_index % schedule_count) + 1
+    edit.schedule[next_index] = cloned_entry
+  end
+
+  edit.schedule = copy_freighter_schedule_entries(edit.schedule)
+  edit.selected_schedule_index = current_index
+  clear_freighter_schedule_drag_state(player_index)
+  refresh_freighter_schedule_editor(player_index)
+  return true, next_index
+end
+
+function handle_freighter_clone_invert_next_leg_hotkey(player_index)
+  local player = game.get_player(player_index)
+  if not player then
+    return
+  end
+
+  local root = player.gui.screen[GUI_ROOT]
+  if not root or not is_gui_root_currently_open(player, root) then
+    return
+  end
+
+  if is_active_signal_picker(player_index) then
+    return
+  end
+
+  if clone_inverted_current_leg_into_next_freighter_schedule_leg(player_index) then
+    play_menu_confirm_sound(player)
+  end
+end
+
 function add_vanilla_window_titlebar(frame, title)
   -- Mirror the base game's screen windows by using a titlebar with a drag
   -- handle and frame action close button instead of relying on a plain caption.
@@ -7860,7 +8025,7 @@ local function broadcast_artist_help_message_for_first_join(player)
   game.print({"", "[Flying Freighters] ", {"ff.artist_help_join_broadcast"}})
 end
 
-local function play_menu_confirm_sound(player)
+play_menu_confirm_sound = function(player)
   if not player then
     return
   end
@@ -7868,6 +8033,16 @@ local function play_menu_confirm_sound(player)
   -- Match Factorio's built-in green confirm click so saving this custom GUI
   -- feels like the rest of the game's menus.
   player.play_sound{path = "utility/confirm"}
+end
+
+play_entity_settings_paste_sound = function(player)
+  if not player then
+    return
+  end
+
+  -- Match the vanilla shift-left paste feedback so custom freighter and
+  -- station settings transfers feel like normal entity settings pastes.
+  player.play_sound{path = "utility/entity_settings_pasted"}
 end
 
 local function open_config_for_player(player, suppress_missing_target_warning)
@@ -8109,12 +8284,7 @@ save_edit = function(player, player_index)
       rec.network_id = parse_station_network_id(edit.network_id)
       invalidate_runtime_cycle_cache()
       local force_now = find_child_recursive(root, GUI_FORCE_NOW)
-      local result = apply_freighter_schedule_update(rec, edit.schedule, 1, force_now and force_now.state or false)
-      if result == "forced" then
-        player.print({"ff.route_change_forced"})
-      elseif result == "queued" then
-        player.print({"ff.route_change_queued"})
-      end
+      apply_freighter_schedule_update(rec, edit.schedule, 1, force_now and force_now.state or false)
       saved_configuration = true
     end
   elseif edit.kind == "freighter-ghost" then
@@ -8134,12 +8304,7 @@ save_edit = function(player, player_index)
     if rec then
       rec.network_id = parse_station_network_id(edit.network_id)
       invalidate_runtime_cycle_cache()
-      local result = apply_freighter_schedule_update(rec, edit.schedule, 1, force_now and force_now.state or false)
-      if result == "forced" then
-        player.print({"ff.route_change_forced"})
-      elseif result == "queued" then
-        player.print({"ff.route_change_queued"})
-      end
+      apply_freighter_schedule_update(rec, edit.schedule, 1, force_now and force_now.state or false)
       saved_configuration = true
     end
   end
@@ -8899,6 +9064,9 @@ script.on_event(INPUT_TOGGLE_AMMO_STOP, function(event)
 end)
 script.on_event(INPUT_TOGGLE_TRASH_STOP, function(event)
   handle_station_gui_hotkey(event.player_index, "trash")
+end)
+script.on_event(INPUT_CLONE_INVERT_NEXT_LEG, function(event)
+  handle_freighter_clone_invert_next_leg_hotkey(event.player_index)
 end)
 script.on_event(INPUT_GUI_CONFIRM, function(event)
   handle_gui_confirm_hotkey(event.player_index)

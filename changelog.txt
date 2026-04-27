@@ -1,4 +1,20 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.9.2
+Date: 26. 04. 2026
+  Bugfixes:
+    - Fixed new freighters so their starter fuel is requested through the logistics network instead of appearing for free, while keeping the burner-slot request visible to bots and players.
+    - Fixed the starter-fuel request payload so creating or loading saves no longer errors with an invalid inventory-position plan.
+    - Fixed freighters getting stranded at refuel or ammo detours when bots or players topped them off before they reached the resupply stop.
+    - Fixed station choice tie-breaks so equally good destinations now spread traffic across matching stops instead of piling multiple freighters onto one target.
+    - Removed the temporary per-tick station buffer sizing debug trace so active transfers no longer spam `factorio-current.log`.
+  Changes:
+    - Shift-copy and shift-paste on freighters and stations now use vanilla-style entity settings feedback instead of printing custom chat confirmations.
+---------------------------------------------------------------------------------------------------
+Version: 0.9.1
+Date: 26. 04. 2026
+  Bugfixes:
+    - Fixed some stuff (I forgot to write down what I fixed or what was even broken lmao).
+---------------------------------------------------------------------------------------------------
 Version: 0.9.0
 Date: 26. 04. 2026
   Features:
@@ -12,3 +28,4 @@ Date: 26. 04. 2026
   Locale:
     - Added English, German, French, Spanish, Russian, Japanese, Simplified Chinese, and Dutch locale coverage for the shipped UI and gameplay strings.
     - Added localized first-join chat messaging asking for community sprite contributions through the mod portal discussion page.
+

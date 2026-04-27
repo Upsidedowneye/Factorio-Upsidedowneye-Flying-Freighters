@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
+COPY_MOD_SCRIPT="${FACTORIO_COPY_MOD_SCRIPT:-$SCRIPT_DIR/copy-mod-to-variables.sh}"
 BIN="${FACTORIO_BIN:-/run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/2.1/Linux/bin/x64/factorio}"
 CONFIG="${FACTORIO_CONFIG:-$SCRIPT_DIR/factorio-smoke-config.ini}"
 MODS="${FACTORIO_MODS:-/run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/2.1/Variables/mods}"
@@ -181,6 +182,11 @@ if [[ ! -f "$CONFIG" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$COPY_MOD_SCRIPT" ]]; then
+  echo "ERROR: Copy-to-Variables script not executable at: $COPY_MOD_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -d "$MODS" ]]; then
   echo "ERROR: Factorio mod directory not found at: $MODS" >&2
   exit 1
@@ -191,6 +197,7 @@ if [[ ! -d "$WORK_SAVE_DIR" ]]; then
 fi
 
 echo "Running smoke test..."
+echo "  copy script: $COPY_MOD_SCRIPT"
 echo "  bin:    $BIN"
 echo "  config: $CONFIG"
 echo "  mods:   $MODS"
@@ -209,6 +216,10 @@ echo "  headless load:   $HEADLESS_EXPLICIT_LOAD"
 if [[ "$LOAD_TIMEOUT_SECONDS" != "0" ]]; then
   echo "  load timeout:    ${LOAD_TIMEOUT_SECONDS}s"
 fi
+
+# Always refresh the deployed Variables/mods copy first so every smoke run
+# validates the exact build the user will launch in their own game.
+"$COPY_MOD_SCRIPT"
 
 TMP_LOG="$(mktemp /tmp/upsidedowneye-smoke.XXXXXX.log)"
 LOAD_LOG="$(mktemp /tmp/upsidedowneye-smoke-load.XXXXXX.log)"
