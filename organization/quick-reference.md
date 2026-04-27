@@ -8,7 +8,7 @@ This mod was made for 1.1 but only half finished before trying to port it to 2.0
 Your directory for all of your Factorio saves, mods, configs, etc is /run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/2.1/AI/
 My directory however is /run/media/upsidedowneye/B4EAD25BEAD21986/Users/Upsidedowneye/Programs/Factorio/2.1/Variables/
 My directory is read-only so if I, for example, prompt you to look at a save in my directory, first copy the save into your directory and then test it there.
-an exception to the above rule is you should always copy this mod to my directory after making a change and after the smoke test passes with ./upsidedowneye-flying-freighters/oragnization/copy-mod-to-variables.sh so that i can continue testing.
+an exception to the above rule is you should always copy this mod to my directory after making a change and after the smoke test passes with ./upsidedowneye-flying-freighters/oragnization/copy-mod-to-variables.sh or by running a smoke test so that i can continue testing.
 The workplace is set to the mods folder of your directory so you can peek at how things are named in other mods if needed for compatability.
 The mod we are working on is called "upsidedowneye-flying-freighters".
 Compatability should be present with all other mods on the mod portal, but most importantly the mod should work with Space-Age and RampantArsenalFork.
@@ -26,3 +26,5 @@ Always write detailed code comments.
 Don't be scared to redo large sections of code if it means optimizing the code.
 Always profile optimizations before and after with smoke tests to verify the optimization actually resulted in a performance increase. Depending on what was optimized you may have to copy my most recent save or ask me to test for you.
 Let me handle git stuff.
+Most doc searches will be very noisy.
+Always ask before version bumping.

@@ -68,6 +68,7 @@ local constants = {
   INPUT_TOGGLE_FUEL_STOP = "ff-station-toggle-fuel",
   INPUT_TOGGLE_AMMO_STOP = "ff-station-toggle-ammo",
   INPUT_TOGGLE_TRASH_STOP = "ff-station-toggle-trash",
+  INPUT_CLONE_INVERT_NEXT_LEG = "ff-freighter-clone-invert-next-leg",
   INPUT_GUI_CONFIRM = "ff-gui-confirm",
   CIRCUIT_SIGNAL_SPECS = circuit_signal_specs,
   STATION_HIDDEN_COMPANION_NAMES = {

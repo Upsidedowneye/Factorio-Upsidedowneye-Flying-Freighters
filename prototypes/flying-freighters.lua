@@ -232,6 +232,8 @@ station.selection_box = {{-4, -4}, {4, 4}}
 station.inventory_size = 480
 station.picture = make_station_picture()
 station.fast_replaceable_group = nil
+station.allow_copy_paste = true
+station.additional_pastable_entities = {passive_provider_station_name}
 station.vehicle_impact_sound = { filename = "__base__/sound/car-metal-impact.ogg", volume = 0.65 }
 station.circuit_wire_max_distance = 9
 
@@ -251,6 +253,8 @@ passive_provider_station.selection_box = {{-4, -4}, {4, 4}}
 passive_provider_station.inventory_size = 480
 passive_provider_station.picture = make_passive_provider_station_picture()
 passive_provider_station.fast_replaceable_group = nil
+passive_provider_station.allow_copy_paste = true
+passive_provider_station.additional_pastable_entities = {station_name}
 passive_provider_station.vehicle_impact_sound = { filename = "__base__/sound/car-metal-impact.ogg", volume = 0.65 }
 passive_provider_station.circuit_wire_max_distance = 9
 
@@ -366,6 +370,7 @@ freighter.energy_per_hit_point = 1
 freighter.inventory_size = 120
 freighter.trunk_inventory_size = nil
 freighter.automatic_weapon_cycling = true
+freighter.allow_copy_paste = true
 
 local gun_candidates = {
   "mortar-gun-rampant-arsenal",
@@ -775,6 +780,13 @@ local station_toggle_trash_input = {
   consuming = "none",
 }
 
+local freighter_clone_invert_next_leg_input = {
+  type = "custom-input",
+  name = shared_constants.INPUT_CLONE_INVERT_NEXT_LEG,
+  key_sequence = "SHIFT + Q",
+  consuming = "none",
+}
+
 local gui_confirm_input = {
   type = "custom-input",
   name = shared_constants.INPUT_GUI_CONFIRM,
@@ -803,6 +815,7 @@ data:extend({
   station_toggle_fuel_input,
   station_toggle_ammo_input,
   station_toggle_trash_input,
+  freighter_clone_invert_next_leg_input,
   gui_confirm_input,
 })
 

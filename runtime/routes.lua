@@ -80,6 +80,33 @@ return function(env)
     return total
   end
 
+  local function count_other_freighters_targeting_station(freighter, station)
+    if not freighter or not station or not station.unit_number or not freighter.entity then
+      return 0
+    end
+
+    local locked_network_id = freighter_route_network_id(freighter)
+    local freighter_surface = freighter.entity.surface
+    local total = 0
+
+    for _, other in pairs(global.ff.freighters or {}) do
+      if other ~= freighter
+        and is_valid(other and other.entity)
+        and other.entity.surface == freighter_surface
+        and other.target_station == station.unit_number
+        and other.state ~= "idle"
+        and (locked_network_id == nil or freighter_route_network_id(other) == locked_network_id)
+      then
+        -- Treat any non-idle freighter that already has this stop targeted as live
+        -- station competition. This keeps otherwise-equal route picks from dogpiling
+        -- a single stop when another matching stop has the same useful cargo/space.
+        total = total + 1
+      end
+    end
+
+    return total
+  end
+
   function build_load_manifest_for_source(source, freighter_inv, cache)
     local manifest = {}
     local total_count = 0
@@ -148,6 +175,7 @@ return function(env)
     local best_manifest = nil
     local best_total_count = 0
     local best_target_priority = nil
+    local best_targeting_count = nil
 
     for _, target in ipairs(target_stations) do
       if is_valid(target.entity)
@@ -181,13 +209,16 @@ return function(env)
 
         if total_count > 0 then
           local target_priority = effective_station_priority_value(target)
+          local targeting_count = count_other_freighters_targeting_station(freighter, target)
           if not best_manifest
             or total_count > best_total_count
-            or (total_count == best_total_count and target_priority > (best_target_priority or -math.huge))
+            or (total_count == best_total_count and targeting_count < (best_targeting_count or math.huge))
+            or (total_count == best_total_count and targeting_count == (best_targeting_count or math.huge) and target_priority > (best_target_priority or -math.huge))
           then
             best_manifest = manifest
             best_total_count = total_count
             best_target_priority = target_priority
+            best_targeting_count = targeting_count
           end
         end
       end
@@ -297,16 +328,19 @@ return function(env)
       local manifest, total_count, target_priority = build_live_load_manifest_for_freighter(freighter, source, freighter_inv, cache)
       if total_count > 0 and manifest_meets_departure_threshold(manifest, freighter_inv, active_entry) then
         local source_priority = effective_station_priority_value(source)
+        local source_targeting_count = count_other_freighters_targeting_station(freighter, source)
         if not best
           or total_count > best.total_count
-          or (total_count == best.total_count and source_priority > best.source_priority)
-          or (total_count == best.total_count and source_priority == best.source_priority and (target_priority or -math.huge) > (best.target_priority or -math.huge))
+          or (total_count == best.total_count and source_targeting_count < (best.source_targeting_count or math.huge))
+          or (total_count == best.total_count and source_targeting_count == (best.source_targeting_count or math.huge) and source_priority > best.source_priority)
+          or (total_count == best.total_count and source_targeting_count == (best.source_targeting_count or math.huge) and source_priority == best.source_priority and (target_priority or -math.huge) > (best.target_priority or -math.huge))
         then
           best = {
             operation = "load",
             source = source,
             manifest = manifest,
             total_count = total_count,
+            source_targeting_count = source_targeting_count,
             source_priority = source_priority,
             target_priority = target_priority,
             route_network_id = effective_station_network_id(source),
@@ -356,16 +390,19 @@ return function(env)
       -- relevant freighters, because in that case early parking only creates churn.
       local manifest, total_count, target_priority = build_live_load_manifest_for_freighter(freighter, source, freighter_inv, cache)
       local source_priority = effective_station_priority_value(source)
+      local source_targeting_count = count_other_freighters_targeting_station(freighter, source)
       if not best
         or total_count > best.total_count
-        or (total_count == best.total_count and source_priority > best.source_priority)
-        or (total_count == best.total_count and source_priority == best.source_priority and (target_priority or -math.huge) > (best.target_priority or -math.huge))
+        or (total_count == best.total_count and source_targeting_count < (best.source_targeting_count or math.huge))
+        or (total_count == best.total_count and source_targeting_count == (best.source_targeting_count or math.huge) and source_priority > best.source_priority)
+        or (total_count == best.total_count and source_targeting_count == (best.source_targeting_count or math.huge) and source_priority == best.source_priority and (target_priority or -math.huge) > (best.target_priority or -math.huge))
       then
         best = {
           operation = "load",
           source = source,
           manifest = manifest,
           total_count = total_count,
+          source_targeting_count = source_targeting_count,
           source_priority = source_priority,
           target_priority = target_priority,
           route_network_id = effective_station_network_id(source),
@@ -384,14 +421,16 @@ return function(env)
       if configured_buffer_count > current_buffered_count then
         if not best_buffered
           or total_count > best_buffered.total_count
-          or (total_count == best_buffered.total_count and source_priority > best_buffered.source_priority)
-          or (total_count == best_buffered.total_count and source_priority == best_buffered.source_priority and (target_priority or -math.huge) > (best_buffered.target_priority or -math.huge))
+          or (total_count == best_buffered.total_count and source_targeting_count < (best_buffered.source_targeting_count or math.huge))
+          or (total_count == best_buffered.total_count and source_targeting_count == (best_buffered.source_targeting_count or math.huge) and source_priority > best_buffered.source_priority)
+          or (total_count == best_buffered.total_count and source_targeting_count == (best_buffered.source_targeting_count or math.huge) and source_priority == best_buffered.source_priority and (target_priority or -math.huge) > (best_buffered.target_priority or -math.huge))
         then
           best_buffered = {
             operation = "load",
             source = source,
             manifest = manifest,
             total_count = total_count,
+            source_targeting_count = source_targeting_count,
             source_priority = source_priority,
             target_priority = target_priority,
             route_network_id = effective_station_network_id(source),
@@ -441,12 +480,18 @@ return function(env)
       local manifest, total_count = build_unload_manifest_for_target(target, cargo_manifest, freighter.unit_number, cache)
       if total_count > 0 then
         local target_priority = effective_station_priority_value(target)
-        if not best or total_count > best.total_count or (total_count == best.total_count and target_priority > best.target_priority) then
+        local targeting_count = count_other_freighters_targeting_station(freighter, target)
+        if not best
+          or total_count > best.total_count
+          or (total_count == best.total_count and targeting_count < (best.targeting_count or math.huge))
+          or (total_count == best.total_count and targeting_count == (best.targeting_count or math.huge) and target_priority > best.target_priority)
+        then
           best = {
             operation = "unload",
             target = target,
             manifest = manifest,
             total_count = total_count,
+            targeting_count = targeting_count,
             target_priority = target_priority,
             route_network_id = effective_station_network_id(target),
             route_key = "unload|" .. tostring(station_route_signal_key(target)),
